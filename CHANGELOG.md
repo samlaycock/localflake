@@ -1,5 +1,11 @@
 # localflake
 
+## 0.1.3
+
+### Patch Changes
+
+- [#10](https://github.com/samlaycock/localflake/pull/10) [`96b424e`](https://github.com/samlaycock/localflake/commit/96b424e0563d9080d345dd440dd645a2a853fa60) Thanks [@samlaycock](https://github.com/samlaycock)! - Fix `TO_VARCHAR` with a format on `TIMESTAMP_TZ` values printing `+00` instead of `+00:00` for `TZH:TZM` when a text bind was range-compared with a date or timestamp column (`WHERE D >= ?`).
+
 ## 0.1.2
 
 ### Patch Changes
