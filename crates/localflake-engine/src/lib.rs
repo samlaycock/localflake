@@ -14,6 +14,7 @@ mod probe;
 mod sketch;
 mod stage;
 mod tz;
+mod xml;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};

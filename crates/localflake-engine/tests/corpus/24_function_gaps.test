@@ -281,3 +281,50 @@ select bucket, bitmap_to_array(bitmap_and_agg(bmp), bucket), bitmap_count(bitmap
 ----
 1|[5]|5
 2|[50000]|1
+
+statement ok
+create table xtab (v object)
+
+statement ok
+insert into xtab select parse_xml(column1) as v from values ('<a/>'), ('<a attr="123">text</a>'), ('<a><b>X</b><b>Y</b></a>')
+
+query rowsort
+select to_varchar(v), v:"@", v:"@attr", typeof(v) from xtab
+----
+<a attr="123">text</a>|"a"|123|OBJECT
+<a></a>|"a"|NULL|OBJECT
+<a><b>X</b><b>Y</b></a>|"a"|NULL|OBJECT
+
+query
+select parse_xml('<test>22257e111</test>'):"$"::float = 2.2257e115, typeof(parse_xml('<test>22257e111</test>'):"$"), parse_xml('<test>22257e111</test>', true):"$"
+----
+true|DOUBLE|"22257e111"
+
+query
+select check_xml('<name> Valid </name>'), check_xml('<name> Invalid </WRONG_CLOSING_TAG>')
+----
+NULL|no opening tag for </WRONG_CLOSING_TAG>, pos 35
+
+statement ok
+create table xml_demo (id integer, object_col object)
+
+statement ok
+insert into xml_demo select 1001, parse_xml('<level1> 1 <level2> 2 <level3> 3A </level3> <level3> 3B </level3> </level2> </level1>')
+
+statement ok
+insert into xml_demo select 1002, parse_xml('<level1> 1 <level2 an_attribute="my attribute"> 2 </level2> </level1>')
+
+query
+select to_varchar(xmlget(object_col, 'level2')), to_varchar(xmlget(xmlget(object_col, 'level2'), 'level3', 1)), get(xmlget(object_col, 'level2'), '$') from xml_demo where id = 1001
+----
+<level2>2<level3>3A</level3><level3>3B</level3></level2>|<level3>3B</level3>|[2,{"$":"3A","@":"level3"},{"$":"3B","@":"level3"}]
+
+query
+select get(xmlget(object_col, 'level2'), '@an_attribute'), xmlget(object_col, 'missing') from xml_demo where id = 1002
+----
+"my attribute"|NULL
+
+query
+select to_xml(parse_xml('<note> <body>Sample XML</body> </note>')), to_xml(object_construct('key1', 'value1', 'key2', 'value2')), to_xml(array_construct('v1', 'v2')), to_xml(parse_json(' { "key1": ["a1", "a2"] } '))
+----
+<note><body>Sample XML</body></note>|<SnowflakeData type="OBJECT"><key1 type="VARCHAR">value1</key1><key2 type="VARCHAR">value2</key2></SnowflakeData>|<SnowflakeData type="ARRAY"><e type="VARCHAR">v1</e><e type="VARCHAR">v2</e></SnowflakeData>|<SnowflakeData type="OBJECT"><key1 type="ARRAY"><e type="VARCHAR">a1</e><e type="VARCHAR">a2</e></key1></SnowflakeData>
