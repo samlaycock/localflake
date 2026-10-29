@@ -285,6 +285,11 @@ fn type_name(column: &Column) -> String {
         SfType::Variant => s.push_str("VARIANT"),
         SfType::Object => s.push_str("OBJECT"),
         SfType::Array => s.push_str("ARRAY"),
+        SfType::Vector => {
+            let (element, dimension) = column.vector.unwrap_or((SfType::Real, 0));
+            let element = if element == SfType::Fixed { "INT" } else { "FLOAT" };
+            write!(s, "VECTOR({element}, {dimension})").unwrap();
+        }
     }
     s
 }

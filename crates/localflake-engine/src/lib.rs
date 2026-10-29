@@ -910,6 +910,9 @@ impl Session {
                     semi.insert(i, SfType::Variant);
                     casts.insert(i, "JSON");
                 }
+                // VECTOR storage stays a fixed-size array (see localflake_sql's type mapping).
+                LogicalTypeId::Array
+                    if matches!(logical.child(0).id(), LogicalTypeId::Integer | LogicalTypeId::Float) => {}
                 LogicalTypeId::List | LogicalTypeId::Array => {
                     semi.insert(i, SfType::Array);
                     casts.insert(i, "JSON");

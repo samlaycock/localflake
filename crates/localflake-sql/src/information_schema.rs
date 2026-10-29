@@ -46,6 +46,7 @@ CREATE OR REPLACE TEMP MACRO sf_data_type(t) AS
         WHEN t LIKE 'TIMESTAMP%' THEN 'TIMESTAMP_NTZ'
         WHEN t = 'BLOB' THEN 'BINARY'
         WHEN t = 'JSON' OR t LIKE 'STRUCT%' OR t LIKE 'MAP%' THEN 'OBJECT'
+        WHEN regexp_matches(t, '^(INTEGER|FLOAT)\[\d+\]$') THEN 'VECTOR'
         WHEN t LIKE '%[]' THEN 'ARRAY'
         WHEN t = 'VARIANT' THEN 'VARIANT'
         ELSE t END;
@@ -62,6 +63,8 @@ CREATE OR REPLACE TEMP MACRO sf_type_desc(t, p, s) AS
         WHEN 'TIMESTAMP_NTZ' THEN 'TIMESTAMP_NTZ(9)'
         WHEN 'TIMESTAMP_LTZ' THEN 'TIMESTAMP_LTZ(9)'
         WHEN 'TIMESTAMP_TZ' THEN CASE WHEN t LIKE '%(%' THEN t ELSE 'TIMESTAMP_TZ(9)' END
+        WHEN 'VECTOR' THEN 'VECTOR(' || CASE WHEN t LIKE 'FLOAT%' THEN 'FLOAT' ELSE 'INT' END || ', '
+            || regexp_extract(t, '\[(\d+)\]', 1) || ')'
         ELSE sf_data_type(t) END;
 CREATE OR REPLACE TEMP MACRO sf_type_json(t, p, s, nullable) AS
     CASE sf_data_type(t)

@@ -67,6 +67,17 @@ CREATE OR REPLACE TEMP MACRO sf_try_to_boolean(x) AS
             WHEN 'false' THEN false WHEN 'f' THEN false WHEN 'no' THEN false WHEN 'n' THEN false WHEN 'off' THEN false WHEN '0' THEN false
             END
         ELSE TRY_CAST(x AS BOOLEAN) END;
+CREATE OR REPLACE TEMP MACRO sf_vector(v) AS CAST(v AS DOUBLE[]);
+CREATE OR REPLACE TEMP MACRO sf_vector_cosine_similarity(a, b) AS
+    CASE WHEN a IS NOT NULL AND b IS NOT NULL THEN list_cosine_similarity(sf_vector(a), sf_vector(b)) END;
+CREATE OR REPLACE TEMP MACRO sf_vector_inner_product(a, b) AS
+    CASE WHEN a IS NOT NULL AND b IS NOT NULL THEN list_inner_product(sf_vector(a), sf_vector(b)) END;
+CREATE OR REPLACE TEMP MACRO sf_vector_l2_distance(a, b) AS
+    CASE WHEN a IS NOT NULL AND b IS NOT NULL THEN list_distance(sf_vector(a), sf_vector(b)) END;
+CREATE OR REPLACE TEMP MACRO sf_vector_l1_distance(a, b) AS
+    CASE WHEN len(a) = len(b)
+        THEN list_sum(list_transform(sf_vector(a), lambda x, i: abs(x - sf_vector(b)[i])))
+        WHEN a IS NOT NULL AND b IS NOT NULL THEN error('vector_l1_distance: vector dimensions must be equal') END;
 CREATE OR REPLACE TEMP MACRO sf_tokens(s, d) AS
     list_filter(string_split_regex(s, '[' || regexp_escape(d) || ']'), lambda t: t <> '');
 CREATE OR REPLACE TEMP MACRO sf_array_to_string(a, sep) AS
@@ -719,6 +730,10 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             }
         }
         "ARRAY_SIZE" => func("sf_array_size", vec![arg(0)?]),
+        // Computed in double precision, whatever the vectors' element type.
+        "VECTOR_COSINE_SIMILARITY" | "VECTOR_INNER_PRODUCT" | "VECTOR_L1_DISTANCE" | "VECTOR_L2_DISTANCE" => {
+            func(&format!("sf_{}", name.to_lowercase()), vec![arg(0)?, arg(1)?])
+        }
         "ARRAY_CONTAINS" => {
             let haystack = cast(cast(arg(1)?, custom_type("VARIANT")), custom_type("JSON"));
             let needle = cast(cast(arg(0)?, custom_type("VARIANT")), custom_type("JSON"));

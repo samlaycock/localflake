@@ -1,0 +1,83 @@
+# VECTOR(INT, n) and VECTOR(FLOAT, n), and the vector similarity functions.
+# Inputs are exact in 32-bit floats, so results don't depend on rounding.
+
+statement ok
+create table vecs (id int, i vector(int, 3), f vector(float, 3))
+
+statement ok
+insert into vecs select 1, [1, 2, 3]::vector(int, 3), [0.5, 1.5, -2]::vector(float, 3)
+
+statement ok
+insert into vecs select 2, [4, 5, 6]::vector(int, 3), [1, 1, 1]::vector(float, 3)
+
+statement ok
+insert into vecs (id) values (3)
+
+query types
+select i, f from vecs order by id
+----
+VECTOR(INT, 3)|VECTOR(FLOAT, 3)
+[1,2,3]|[0.5,1.5,-2]
+[4,5,6]|[1,1,1]
+NULL|NULL
+
+query types
+select [1, 2]::vector(int, 2), [1.25, -3]::vector(float, 2)
+----
+VECTOR(INT, 2)|VECTOR(FLOAT, 2)
+[1,2]|[1.25,-3]
+
+query types
+select vector_inner_product(a.i, b.i), vector_l1_distance(a.i, b.i), vector_l2_distance(a.i, b.i)
+from vecs a, vecs b where a.id = 1 and b.id = 2
+----
+FLOAT|FLOAT|FLOAT
+32|9|5.196152422706632
+
+query
+select vector_cosine_similarity(a.i, b.i) from vecs a, vecs b where a.id = 1 and b.id = 2
+----
+0.9746318461970762
+
+query
+select vector_inner_product(f, [2, 2, 2]::vector(float, 3)), vector_l1_distance(f, [1, 1, 1]::vector(float, 3)),
+    vector_l2_distance(f, f), vector_cosine_similarity(f, f)
+from vecs where id = 1
+----
+0|4|0|1
+
+query
+select vector_inner_product(i, i) from vecs where id = 3
+----
+NULL
+
+query
+select i::array, [0.5, -2.5]::vector(float, 2)::array, array_size(i::array) from vecs where id = 1
+----
+[1,2,3]|[0.5,-2.5]|3
+
+query
+select column_name, data_type from information_schema.columns where table_name = 'VECS' order by ordinal_position
+----
+ID|NUMBER
+I|VECTOR
+F|VECTOR
+
+statement ok
+desc table vecs
+
+query
+select "name", "type" from table(result_scan(last_query_id()))
+----
+ID|NUMBER(38,0)
+I|VECTOR(INT, 3)
+F|VECTOR(FLOAT, 3)
+
+error
+select [1, 2]::vector(int, 3)
+
+error
+select vector_l2_distance([1, 2]::vector(float, 2), [1, 2, 3]::vector(float, 3))
+
+error
+create table bad (v vector(varchar, 3))

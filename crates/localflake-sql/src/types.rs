@@ -10,9 +10,12 @@
 //! | `TIMESTAMP_NTZ`, `DATETIME` | `TIMESTAMP` |
 //! | `TIMESTAMP_LTZ`, `TIMESTAMP_TZ` | `TIMESTAMPTZ` |
 //! | `VARIANT`, `OBJECT`, `ARRAY` | `VARIANT` |
+//! | `VECTOR(INT, n)`, `VECTOR(FLOAT, n)` | `INTEGER[n]`, `FLOAT[n]` |
 //!
 //! Integers are stored as `BIGINT` rather than `DECIMAL(38,0)` because DuckDB
 //! functions accept `BIGINT` far more widely; values beyond ±9.2e18 overflow.
+//! Vectors are the only 32-bit numbers and fixed-size arrays, which is how the
+//! engine recognises them in results.
 
 use sqlparser::ast::{DataType, ExactNumberInfo, TimezoneInfo};
 
@@ -82,7 +85,8 @@ pub fn map_type(data_type: &DataType, ctx: &Context) -> Result<DataType, SqlErro
                 // OBJECT and ARRAY; both convert to and from VARIANT.
                 "OBJECT" => custom_type("JSON"),
                 "ARRAY" => custom_type("VARIANT[]"),
-                "GEOGRAPHY" | "GEOMETRY" | "VECTOR" => return Err(SqlError::Unsupported(format!("data type {name}"))),
+                "VECTOR" => vector(modifiers)?,
+                "GEOGRAPHY" | "GEOMETRY" => return Err(SqlError::Unsupported(format!("data type {name}"))),
                 _ => data_type.clone(),
             }
         }
@@ -113,6 +117,25 @@ fn exact_number(modifiers: &[String]) -> Result<ExactNumberInfo, SqlError> {
         [p, s] => ExactNumberInfo::PrecisionAndScale(parse(p)?, parse(s)? as i64),
         _ => return Err(SqlError::Unsupported(format!("NUMBER({})", modifiers.join(", ")))),
     })
+}
+
+/// The most dimensions Snowflake allows in a VECTOR.
+const MAX_VECTOR_DIMENSION: u64 = 4096;
+
+/// `VECTOR(<INT | FLOAT>, <dimension>)`.
+fn vector(modifiers: &[String]) -> Result<DataType, SqlError> {
+    let invalid = || SqlError::Unsupported(format!("VECTOR({})", modifiers.join(", ")));
+    let [element, dimension] = modifiers else { return Err(invalid()) };
+    let element = match element.trim().to_uppercase().as_str() {
+        "INT" | "INTEGER" => "INTEGER",
+        "FLOAT" => "FLOAT",
+        _ => return Err(invalid()),
+    };
+    let dimension: u64 = dimension.trim().parse().map_err(|_| invalid())?;
+    if !(1..=MAX_VECTOR_DIMENSION).contains(&dimension) {
+        return Err(invalid());
+    }
+    Ok(custom_type(&format!("{element}[{dimension}]")))
 }
 
 fn ntz() -> DataType {
@@ -156,8 +179,18 @@ mod tests {
             ("VARIANT", "VARIANT"),
             ("OBJECT", "JSON"),
             ("ARRAY", "VARIANT[]"),
+            ("VECTOR(FLOAT, 3)", "FLOAT[3]"),
+            ("VECTOR(INT, 256)", "INTEGER[256]"),
         ] {
             assert_eq!(mapped(sf), duck, "{sf}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_vectors() {
+        for sf in ["VECTOR(FLOAT)", "VECTOR(VARCHAR, 3)", "VECTOR(INT, 0)", "VECTOR(FLOAT, 4097)"] {
+            let data_type = Parser::new(&SnowflakeDialect).try_with_sql(sf).unwrap().parse_data_type().unwrap();
+            assert!(map_type(&data_type, &Context::default()).is_err(), "{sf}");
         }
     }
 }

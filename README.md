@@ -162,8 +162,10 @@ differences between drivers.
 - Types: `NUMBER(p,s)`, `INT` family, `FLOAT`, `VARCHAR(n)`/`STRING`/`CHAR(n)`,
   `BINARY(n)`, `BOOLEAN`, `DATE`, `TIME`, `TIMESTAMP_NTZ/LTZ/TZ` (honouring
   `TIMESTAMP_TYPE_MAPPING` and the session `TIMEZONE`), `VARIANT`, `OBJECT`,
-  `ARRAY`, each reported with its Snowflake type (see "How Snowflake types are
-  stored"), JSON null distinct from SQL NULL
+  `ARRAY`, `VECTOR(INT|FLOAT, n)`, each reported with its Snowflake type (see
+  "How Snowflake types are stored"), JSON null distinct from SQL NULL
+- Vectors: casts from and to `ARRAY`, and `VECTOR_COSINE_SIMILARITY`,
+  `VECTOR_INNER_PRODUCT`, `VECTOR_L1_DISTANCE` and `VECTOR_L2_DISTANCE`
 - Collations (`COLLATE 'en-ci'`, `'en-ai'`, `COLLATE(...)`) for case- and
   accent-insensitive comparison, `COMPRESS`/`DECOMPRESS_*`, `SYSTEM$TYPEOF`
 - `MATCH_RECOGNIZE` (see "Known differences" for its scope),
@@ -253,6 +255,7 @@ URLs such as `s3://` are rejected).
 | `VARIANT` | `VARIANT` | JSON null is stored as a reserved marker string, so it stays distinct from SQL NULL; SQL NULL array elements print as `undefined` |
 | `OBJECT` | `JSON` | normalized through VARIANT, so keys are sorted |
 | `ARRAY` | `VARIANT[]` | |
+| `VECTOR(INT, n)`, `VECTOR(FLOAT, n)` | `INTEGER[n]`, `FLOAT[n]` | the only 32-bit numbers and fixed-size arrays, which is how results recognise them; sent to drivers as JSON arrays or Arrow fixed-size lists |
 | `TIMESTAMP_LTZ` | `TIMESTAMPTZ` | follows the session `TIMEZONE` (default `America/Los_Angeles`) through ICU |
 | `TIMESTAMP_TZ` | `TIMESTAMP_NS` | the sub-microsecond digits hold the UTC offset; registered DuckDB casts convert to and from it |
 | `VARCHAR(n)`, `CHAR(n)`, `BINARY(n)` | `VARCHAR`, `BLOB` | the declared type lives in the column comment; lengths are enforced with a CHECK |
@@ -298,6 +301,11 @@ types known.
   compression aren't supported, `COPY` reports only each file's first error, and
   load history is kept in memory (lost on restart). External stages (S3, GCS,
   Azure), storage integrations, pipes and directory tables aren't emulated.
+- Vector functions compute in double precision and accept vectors of different
+  element types (Snowflake requires the same type and dimension; different
+  dimensions are an error in both). gosnowflake can't decode `VECTOR` columns in
+  Arrow results, so Go applications need JSON results
+  (`GO_QUERY_RESULT_FORMAT = 'JSON'`) to read them.
 - Not implemented: JavaScript/Python/Java UDFs, stored procedures, Snowflake
   Scripting, time travel, streams and tasks.
 - No authentication, roles or access control.

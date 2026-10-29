@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use localflake_engine::{Bind, Column, EngineError, QueryResult, StatementKind, Transfer};
+use localflake_engine::{Bind, Column, EngineError, QueryResult, SfType, StatementKind, Transfer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -154,7 +154,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn rowtype(column: &Column) -> Value {
-    json!({
+    let mut rowtype = json!({
         "name": column.name,
         "database": "",
         "schema": "",
@@ -166,7 +166,24 @@ pub fn rowtype(column: &Column) -> Value {
         "byteLength": column.length,
         "nullable": column.nullable,
         "collation": null,
-    })
+    });
+    // VECTOR columns also describe their elements.
+    if let Some((element, dimension)) = column.vector {
+        let fixed = element == SfType::Fixed;
+        rowtype["vectorDimension"] = json!(dimension);
+        rowtype["fields"] = json!([{
+            "name": "",
+            "type": element.name(),
+            "precision": fixed.then_some(38),
+            "scale": fixed.then_some(0),
+            "length": null,
+            "byteLength": null,
+            "nullable": false,
+            "collation": null,
+            "fields": null,
+        }]);
+    }
+    rowtype
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
