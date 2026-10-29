@@ -60,6 +60,18 @@ impl EngineError {
         )
     }
 
+    pub(crate) fn canceled() -> Self {
+        Self::new("000604", "57014", "SQL execution canceled")
+    }
+
+    pub(crate) fn timed_out(seconds: u64) -> Self {
+        Self::new(
+            "000630",
+            "57014",
+            format!("Statement reached its statement or warehouse timeout of {seconds} second(s) and was canceled."),
+        )
+    }
+
     pub(crate) fn invalid_parameter(name: &str, value: &str) -> Self {
         Self::new("002043", "42601", format!("SQL compilation error:\ninvalid value [{value}] for parameter '{name}'"))
     }

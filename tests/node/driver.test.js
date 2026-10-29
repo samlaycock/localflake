@@ -158,3 +158,35 @@ test("put, copy and get through a stage", async () => {
   assert.equal(get.rows[0].status, "DOWNLOADED");
   assert.equal(fs.readFileSync(path.join(out, "data"), "utf8"), "1,Ada\n2,Grace\n");
 });
+
+// Runs for minutes unless the server stops it.
+const endless =
+  "select count(*) from table(generator(rowcount => 100000000000)) where uniform(1, 10, random()) > 0";
+
+test("cancel a running statement", async () => {
+  const conn = await connect();
+  let statement;
+  const finished = new Promise((resolve) => {
+    statement = conn.execute({ sqlText: endless, complete: (err) => resolve(err) });
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  await new Promise((resolve, reject) => statement.cancel((err) => (err ? reject(err) : resolve())));
+  const err = await finished;
+  assert.ok(err, "the statement should fail");
+  // The session runs one statement at a time, so this only returns quickly if
+  // the cancel stopped the endless statement on the server.
+  const started = Date.now();
+  const { rows } = await exec(conn, "select 1 as one");
+  assert.equal(rows[0].ONE, 1);
+  assert.ok(Date.now() - started < 5_000);
+});
+
+test("statement timeout", async () => {
+  const conn = await connect();
+  await exec(conn, "alter session set statement_timeout_in_seconds = 1");
+  await assert.rejects(exec(conn, endless), (err) => {
+    assert.equal(err.code, "000630");
+    assert.equal(err.sqlState, "57014");
+    return true;
+  });
+});

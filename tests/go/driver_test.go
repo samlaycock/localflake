@@ -281,3 +281,45 @@ func TestQueryID(t *testing.T) {
 		t.Fatalf("result_scan(%s): %d %v", id, again, err)
 	}
 }
+
+// endless runs for minutes unless the server stops it.
+const endless = "select count(*) from table(generator(rowcount => 100000000000)) where uniform(1, 10, random()) > 0"
+
+func TestCancel(t *testing.T) {
+	db := open(t, "GO_CANCEL")
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	var n int
+	if err := conn.QueryRowContext(ctx, endless).Scan(&n); err == nil {
+		t.Fatal("the query should be cancelled")
+	}
+	// The session runs one statement at a time, so this only returns quickly
+	// if the abort request stopped the endless query on the server.
+	started := time.Now()
+	if err := conn.QueryRowContext(context.Background(), "select 1").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("got %d, %v", n, err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("the next query waited %v", elapsed)
+	}
+}
+
+func TestStatementTimeout(t *testing.T) {
+	db := open(t, "GO_TIMEOUT")
+	if _, err := db.Exec("alter session set statement_timeout_in_seconds = 1"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Query(endless)
+	sfErr, ok := err.(*sf.SnowflakeError)
+	if !ok {
+		t.Fatalf("not a SnowflakeError: %v", err)
+	}
+	if sfErr.Number != 630 || sfErr.SQLState != "57014" {
+		t.Fatalf("got %d %s", sfErr.Number, sfErr.SQLState)
+	}
+}

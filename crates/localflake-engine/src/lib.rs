@@ -4,6 +4,7 @@
 //! either in memory or as `<data_dir>/<NAME>.duckdb`. Each Snowflake session
 //! gets its own DuckDB connection, so `USE` and session settings stay local.
 
+mod cancel;
 mod encode;
 mod error;
 mod files;
@@ -25,6 +26,7 @@ use duckdb::types::Value;
 pub use localflake_sql::StatementKind;
 use localflake_sql::{Command, Context, SqlCommand, TimestampMapping, UseTarget};
 
+pub use cancel::CancelToken;
 pub use encode::{Column, QueryResult, SfType};
 pub use error::EngineError;
 pub use stage::Transfer;
@@ -109,6 +111,7 @@ struct Inner {
     /// convenient for tests) or logs in without a current database, as Snowflake does.
     create_missing_databases: std::sync::atomic::AtomicBool,
     stages: stage::StageStore,
+    running: Arc<cancel::Running>,
 }
 
 struct RawDatabase(duckdb::ffi::duckdb_database);
@@ -293,6 +296,8 @@ pub struct Request<'a> {
     pub describe_only: bool,
     /// `MULTI_STATEMENT_COUNT` for this request (0 = any number).
     pub statement_count: Option<usize>,
+    /// Cancels the request from another thread.
+    pub cancel: CancelToken,
 }
 
 impl Engine {
@@ -307,6 +312,8 @@ impl Engine {
         let db = RawDatabase(raw);
         let root = unsafe { Connection::open_from_raw(db.0) }?;
         functions::register(&root)?;
+        let running = cancel::Running::open();
+        root.register_scalar_function_with_state::<cancel::CancelQuery>("sf_cancel_query", &running)?;
         unsafe { probe::register(db.0) }.map_err(EngineError::internal)?;
         let icu = load_icu(&root);
         unsafe { tz::register(db.0) }.map_err(EngineError::internal)?;
@@ -330,6 +337,7 @@ impl Engine {
                 next_session: AtomicU64::new(1),
                 create_missing_databases: std::sync::atomic::AtomicBool::new(true),
                 stages: stage::StageStore::open(data_dir).map_err(EngineError::internal)?,
+                running,
             }),
         })
     }
@@ -355,6 +363,7 @@ impl Engine {
         };
         let mut session = Session {
             engine: self.clone(),
+            interrupt: conn.interrupt_handle(),
             conn,
             ctx,
             in_transaction: false,
@@ -389,6 +398,11 @@ impl Engine {
         self.inner.stages.file(relative)
     }
 
+    /// Cancels a running statement by query ID, returning whether it was running.
+    pub fn cancel_query(&self, query_id: &str) -> bool {
+        self.inner.running.cancel_query(query_id)
+    }
+
     /// A stored result by query ID.
     pub fn result(&self, query_id: &str) -> Option<StoredResult> {
         self.inner.results.lock().unwrap().results.get(query_id).cloned()
@@ -401,6 +415,8 @@ impl Engine {
 
 pub struct Session {
     conn: Connection,
+    /// Interrupts `conn`, for cancelling its statements (see `cancel`).
+    interrupt: Arc<duckdb::InterruptHandle>,
     engine: Engine,
     ctx: Context,
     /// Whether a DuckDB transaction is open (duckdb-rs's `is_autocommit` is a stub).
@@ -471,11 +487,15 @@ impl Session {
         if desired != 0 && statements.len() != desired {
             return Err(self.fail(EngineError::statement_count(statements.len(), desired)));
         }
+        let timeout = self.statement_timeout();
         let mut results = Vec::with_capacity(statements.len());
         for statement in &statements {
             let query_id = new_query_id();
             let bindings = if statements.len() == 1 { request.bindings.as_slice() } else { &[] };
-            let result = self.run_statement(statement, &query_id, bindings, request.describe_only).map(Arc::new);
+            let result = match request.cancel.error(timeout) {
+                Some(error) => Err(error),
+                None => self.run_cancellable(statement, &query_id, bindings, request, timeout).map(Arc::new),
+            };
             self.engine.store(&query_id, result.clone());
             self.ctx.query_history.push(query_id.clone());
             match result {
@@ -495,6 +515,33 @@ impl Session {
             }
         }
         Ok(results)
+    }
+
+    /// Runs a statement that the request's cancel token, `SYSTEM$CANCEL_QUERY`
+    /// or the statement timeout can interrupt. An interrupted statement fails
+    /// with Snowflake's cancellation error.
+    fn run_cancellable(
+        &mut self,
+        statement: &str,
+        query_id: &str,
+        bindings: &[Vec<Bind>],
+        request: &Request,
+        timeout: u64,
+    ) -> Result<QueryResult, EngineError> {
+        let limit = (timeout > 0).then(|| std::time::Duration::from_secs(timeout));
+        let running = self.engine.inner.running.start(query_id, &request.cancel, self.interrupt.clone(), limit);
+        let result = self.run_statement(statement, query_id, bindings, request.describe_only);
+        drop(running);
+        let Some(error) = request.cancel.error(timeout) else { return result };
+        // An interrupt that lands after the statement's last DuckDB query stays
+        // pending inside a transaction; this query takes it instead of the next statement.
+        let _ = self.conn.execute_batch("SELECT 1");
+        result.map_err(|_| error)
+    }
+
+    /// `STATEMENT_TIMEOUT_IN_SECONDS`, where 0 means no limit.
+    fn statement_timeout(&self) -> u64 {
+        self.ctx.parameters.get("STATEMENT_TIMEOUT_IN_SECONDS").and_then(|v| v.parse().ok()).unwrap_or(0)
     }
 
     /// Translates a statement, running a type probe first when its SQL has

@@ -835,6 +835,8 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         }
         "TYPEOF" => func("sf_typeof", vec![arg(0)?]),
         "SYSTEM$TYPEOF" => crate::typing::system_typeof(ctx, arg(0)?),
+        // `random()` keeps DuckDB from folding the call, and cancelling, when it only prepares the statement.
+        "SYSTEM$CANCEL_QUERY" => func("sf_cancel_query", vec![arg(0)?, func("random", vec![])]),
         "IS_OBJECT" | "IS_ARRAY" | "IS_INTEGER" | "IS_DECIMAL" | "IS_DOUBLE" | "IS_REAL" | "IS_BOOLEAN" | "IS_CHAR"
         | "IS_VARCHAR" | "IS_DATE" | "IS_TIMESTAMP_NTZ" | "IS_TIMESTAMP_LTZ" | "IS_BINARY" => {
             let types: &[&str] = match &name[3..] {
