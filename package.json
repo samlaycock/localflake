@@ -1,6 +1,6 @@
 {
   "name": "localflake",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Release tooling for localflake. The version here is the source of truth; Cargo.toml follows it.",
   "repository": "github:samlaycock/localflake",

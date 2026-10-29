@@ -1,5 +1,11 @@
 # localflake
 
+## 0.1.2
+
+### Patch Changes
+
+- [#8](https://github.com/samlaycock/localflake/pull/8) [`0e3668e`](https://github.com/samlaycock/localflake/commit/0e3668e00d8e3d76d53d2a0f115aab2056f345ac) Thanks [@samlaycock](https://github.com/samlaycock)! - Fix two bugs in statements with `?` binds: `TO_VARCHAR` with a format on `TIMESTAMP_TZ` values printed `+00` instead of `+00:00` for `TZH:TZM` when a bind fed a `FLATTEN` subquery (`... IN (SELECT VALUE FROM TABLE(FLATTEN(INPUT => PARSE_JSON(?))))`), and `ESCAPE '\\'` failed with "Unterminated string literal".
+
 ## 0.1.1
 
 ### Patch Changes
