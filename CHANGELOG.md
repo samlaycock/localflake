@@ -1,5 +1,11 @@
 # localflake
 
+## 0.1.1
+
+### Patch Changes
+
+- [#6](https://github.com/samlaycock/localflake/pull/6) [`f20eb41`](https://github.com/samlaycock/localflake/commit/f20eb418ee974d2f40d211d704c5a19ab45daa5e) Thanks [@samlaycock](https://github.com/samlaycock)! - Fix `TO_VARCHAR`/`TO_CHAR` with a format on `TIMESTAMP_TZ` and `TIMESTAMP_LTZ` values: date and time parts now print in the value's own offset instead of UTC, `TZH:TZM` keeps its minutes (`+00:00`, not `+00`), and formats made only of `TZH`/`TZM` no longer fail with a `TIMESTAMP_NS -> DOUBLE` cast error.
+
 ## 0.1.0
 
 ### Minor Changes
