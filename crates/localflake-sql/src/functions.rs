@@ -113,6 +113,18 @@ CREATE OR REPLACE TEMP MACRO sf_arrays_to_object(k, v) AS
                 lambda i: CAST(sf_variant_array(k)[i + 1] AS VARCHAR)),
             list_transform(list_filter(range(len(sf_variant_array(k))), lambda i: sf_variant_array(k)[i + 1] IS NOT NULL),
                 lambda i: coalesce(sf_variant_array(v)[i + 1], sf_json_null()))) AS JSON) END;
+CREATE OR REPLACE TEMP MACRO sf_bitmap_bucket_number(v) AS
+    CAST(CASE WHEN v > 0 THEN floor((v - 1) / 32768) + 1 ELSE ceil(v / 32768) END AS BIGINT);
+CREATE OR REPLACE TEMP MACRO sf_bitmap_bit_position(v) AS
+    CAST(CASE WHEN v > 0 THEN (v - 1) % 32768 ELSE abs(v) % 32768 END AS BIGINT);
+CREATE OR REPLACE TEMP MACRO sf_top_k_merge(entries) AS
+    CAST(list_transform(list_distinct(list_transform(entries, lambda e: e[1])),
+        lambda v: [v, CAST(list_sum(list_transform(list_filter(entries, lambda e: e[1] = v), lambda e: CAST(e[2] AS BIGINT))) AS VARIANT)])
+        AS VARIANT);
+CREATE OR REPLACE TEMP MACRO sf_top_k(entries, k) AS
+    list_transform(list_slice(list_sort(
+        list_transform(entries, lambda e: struct_pack(c := -CAST(e[2] AS BIGINT), t := sf_variant_text(e[1]), e := e))),
+        1, k), lambda s: s.e);
 CREATE OR REPLACE TEMP MACRO sf_tokens(s, d) AS
     list_filter(string_split_regex(s, '[' || regexp_escape(d) || ']'), lambda t: t <> '');
 CREATE OR REPLACE TEMP MACRO sf_array_to_string(a, sep) AS
@@ -228,6 +240,13 @@ const OBJECT_RESULTS: &[&str] = &[
     "TO_OBJECT",
     "AS_OBJECT",
     "ARRAYS_TO_OBJECT",
+    "HLL_EXPORT",
+    "APPROX_PERCENTILE_ACCUMULATE",
+    "APPROX_PERCENTILE_COMBINE",
+    "APPROX_TOP_K_ACCUMULATE",
+    "APPROX_TOP_K_COMBINE",
+    "MINHASH",
+    "MINHASH_COMBINE",
 ];
 
 /// Functions whose Snowflake result type is ARRAY.
@@ -265,6 +284,8 @@ const ARRAY_RESULTS: &[&str] = &[
     "REGEXP_EXTRACT_ALL",
     "ARRAY_REMOVE_AT",
     "ARRAY_REPEAT",
+    "APPROX_TOP_K_ESTIMATE",
+    "BITMAP_TO_ARRAY",
 ];
 
 fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlError> {
@@ -1077,6 +1098,112 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         "BITXOR_AGG" => return rename(f, "bit_xor"),
         "SKEW" => return rename(f, "skewness"),
         "HLL" | "APPROX_COUNT_DISTINCT" => return rename(f, "approx_count_distinct"),
+        // Sketch states (see the engine's `sketch` module). Each `*_ACCUMULATE`
+        // and `*_COMBINE` collects its group with DuckDB's `list` aggregate.
+        "HLL_ACCUMULATE" => {
+            let value = arg(0)?;
+            let hash = case(vec![(is_not_null(value.clone()), func("hash", vec![value]))], None);
+            func("sf_hll_state", vec![aggregate(f, "list", vec![hash])])
+        }
+        "HLL_COMBINE" => func(
+            "sf_hll_state",
+            vec![func("flatten", vec![aggregate(f, "list", vec![func("sf_hll_hashes", vec![arg(0)?])])])],
+        ),
+        "HLL_ESTIMATE" => cast(func("len", vec![func("sf_hll_hashes", vec![arg(0)?])]), DataType::BigInt(None)),
+        "HLL_EXPORT" => func(
+            "json_object",
+            vec![string("version"), number(1), string("hashes"), func("sf_hll_hashes", vec![arg(0)?])],
+        ),
+        "HLL_IMPORT" => func("sf_hll_state", vec![cast(object_field(arg(0)?, "hashes"), custom_type("UBIGINT[]"))]),
+        "APPROX_PERCENTILE_ACCUMULATE" => {
+            let values = aggregate(f, "list", vec![cast(arg(0)?, DataType::Double(ExactNumberInfo::None))]);
+            sketch_state(
+                "tdigest",
+                func("list_sort", vec![func("list_filter", vec![values, parse_expr("lambda __x: __x IS NOT NULL")])]),
+            )
+        }
+        "APPROX_PERCENTILE_COMBINE" => {
+            let states = aggregate(f, "list", vec![cast(object_field(arg(0)?, "state"), custom_type("DOUBLE[]"))]);
+            sketch_state("tdigest", func("list_sort", vec![func("flatten", vec![states])]))
+        }
+        "APPROX_PERCENTILE_ESTIMATE" => func(
+            "list_aggregate",
+            vec![cast(object_field(arg(0)?, "state"), custom_type("DOUBLE[]")), string("quantile_cont"), arg(1)?],
+        ),
+        // [[value, count], ...] for every distinct value.
+        "APPROX_TOP_K_ACCUMULATE" => {
+            let counts = aggregate(f, "histogram", vec![arg(0)?]);
+            let pairs = parse_expr(
+                "list_transform(map_entries(__h), lambda __e: [CAST(__e.key AS VARIANT), CAST(__e.value AS VARIANT)])",
+            );
+            sketch_state("spacesaving", cast(replace_identifier(pairs, "__h", counts), custom_type("VARIANT")))
+        }
+        "APPROX_TOP_K_COMBINE" => {
+            let entries = func("flatten", vec![aggregate(f, "list", vec![top_k_entries(arg(0)?)])]);
+            sketch_state("spacesaving", func("sf_top_k_merge", vec![entries]))
+        }
+        // The k most frequent values, most frequent first.
+        "APPROX_TOP_K_ESTIMATE" => {
+            let k = opt_arg(1)?.unwrap_or_else(|| number(1));
+            cast(func("sf_top_k", vec![top_k_entries(arg(0)?), k]), custom_type("VARIANT"))
+        }
+        "MINHASH" => {
+            let args = args()?;
+            let k =
+                cast(args.first().cloned().ok_or_else(|| SqlError::Arguments(name.clone()))?, DataType::BigInt(None));
+            let values = args[1..].to_vec();
+            if values.is_empty() {
+                return Err(SqlError::Unsupported("MINHASH(k, *)".into()));
+            }
+            let present = and_all(values.iter().cloned().map(is_not_null).collect());
+            let hash = case(vec![(present, func("hash", values))], None);
+            sketch_state("minhash", func("sf_minhash", vec![aggregate(f, "list", vec![hash]), k]))
+        }
+        "MINHASH_COMBINE" => {
+            let states = aggregate(f, "list", vec![cast(object_field(arg(0)?, "state"), custom_type("BIGINT[]"))]);
+            let combined = parse_expr(
+                "list_reduce(__s, lambda __a, __b: list_transform(__a, lambda __x, __i: least(__x, __b[__i])))",
+            );
+            sketch_state("minhash", replace_identifier(combined, "__s", states))
+        }
+        // The share of hash positions where every state agrees.
+        "APPROXIMATE_SIMILARITY" | "APPROXIMATE_JACCARD_INDEX" => {
+            let states = aggregate(f, "list", vec![cast(object_field(arg(0)?, "state"), custom_type("BIGINT[]"))]);
+            let similarity = parse_expr(
+                "CAST(len(list_filter(range(1, len(__s[1]) + 1), \
+                 lambda __i: len(list_distinct(list_transform(__s, lambda __m: __m[__i]))) = 1)) AS DOUBLE) / len(__s[1])",
+            );
+            replace_identifier(similarity, "__s", states)
+        }
+        "BITMAP_BUCKET_NUMBER" => func("sf_bitmap_bucket_number", vec![arg(0)?]),
+        "BITMAP_BIT_POSITION" => func("sf_bitmap_bit_position", vec![arg(0)?]),
+        "BITMAP_CONSTRUCT_AGG" => {
+            func("sf_bitmap_state", vec![aggregate(f, "list", vec![cast(arg(0)?, DataType::BigInt(None))])])
+        }
+        "BITMAP_OR_AGG" => func(
+            "sf_bitmap_state",
+            vec![func("flatten", vec![aggregate(f, "list", vec![func("sf_bitmap_positions", vec![arg(0)?])])])],
+        ),
+        "BITMAP_AND_AGG" => {
+            let positions = aggregate(f, "list", vec![func("sf_bitmap_positions", vec![arg(0)?])]);
+            let common = parse_expr("list_reduce(__p, lambda __a, __b: list_intersect(__a, __b))");
+            func("sf_bitmap_state", vec![replace_identifier(common, "__p", positions)])
+        }
+        "BITMAP_COUNT" => cast(func("len", vec![func("sf_bitmap_positions", vec![arg(0)?])]), DataType::BigInt(None)),
+        // The values whose bits are set: positions, or values in bucket `bucket`.
+        "BITMAP_TO_ARRAY" => {
+            let positions = func("sf_bitmap_positions", vec![arg(0)?]);
+            let values = match opt_arg(1)? {
+                Some(bucket) => {
+                    let to_value =
+                        parse_expr("list_transform(__positions, lambda __x: (__bucket - 1) * 32768 + __x + 1)");
+                    // Substitute the bucket first: `positions` may contain lambdas of its own.
+                    replace_identifier(replace_identifier(to_value, "__bucket", bucket), "__positions", positions)
+                }
+                None => positions,
+            };
+            cast(values, custom_type("VARIANT"))
+        }
         "COUNT" if matches!(&f.args, FunctionArguments::List(l) if l.args.len() > 1) => {
             // COUNT(DISTINCT a, b): rows where every argument is non-NULL.
             let args = args()?;
@@ -1213,6 +1340,29 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         _ => return Ok(None),
     };
     Ok(Some(expr))
+}
+
+/// `name(args)` as an aggregate that keeps `f`'s window, FILTER and DISTINCT.
+fn aggregate(f: &Function, name: &str, args: Vec<Expr>) -> Expr {
+    let mut agg = f.clone();
+    agg.name = object_name(&[name]);
+    agg.args = function_args(args, None);
+    Expr::Function(agg)
+}
+
+/// A field of an OBJECT (or VARIANT holding one), as JSON.
+fn object_field(object: Expr, field: &str) -> Expr {
+    func("json_extract", vec![func("sf_object_json", vec![object]), string(format!("$.{field}"))])
+}
+
+/// A sketch state OBJECT: `{"state": ..., "type": ..., "version": 1}`.
+fn sketch_state(kind: &str, state: Expr) -> Expr {
+    func("json_object", vec![string("state"), state, string("type"), string(kind), string("version"), number(1)])
+}
+
+/// The `[value, count]` entries of an APPROX_TOP_K state.
+fn top_k_entries(state: Expr) -> Expr {
+    cast(cast(object_field(state, "state"), custom_type("VARIANT")), custom_type("VARIANT[][]"))
 }
 
 /// The FLOAT vector type with the dimension of `vector_type` (`INTEGER[3]` → `FLOAT[3]`).

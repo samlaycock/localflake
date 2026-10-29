@@ -33,6 +33,11 @@ pub fn register(conn: &Connection) -> duckdb::Result<()> {
     conn.register_scalar_function::<Soundex>("sf_soundex")?;
     conn.register_scalar_function::<SoundexP123>("sf_soundex_p123")?;
     conn.register_scalar_function::<Wait>("sf_wait")?;
+    conn.register_scalar_function::<crate::sketch::HllState>("sf_hll_state")?;
+    conn.register_scalar_function::<crate::sketch::HllHashes>("sf_hll_hashes")?;
+    conn.register_scalar_function::<crate::sketch::BitmapState>("sf_bitmap_state")?;
+    conn.register_scalar_function::<crate::sketch::BitmapPositions>("sf_bitmap_positions")?;
+    conn.register_scalar_function::<crate::sketch::MinHash>("sf_minhash")?;
     conn.register_scalar_function::<Sha2>("sf_sha2")?;
     conn.register_scalar_function::<InitCap>("sf_initcap")?;
     conn.register_scalar_function::<ParseUrl>("sf_parse_url")?;
