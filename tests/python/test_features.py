@@ -218,3 +218,25 @@ def test_put_copy_get_roundtrip(connect, tmp_path):
     got = cur.execute(f"get @fixtures/out/ file://{out}/").fetchall()
     assert got[0][2] == "DOWNLOADED"
     assert (out / "data").read_text() == "1,Ada\n2,Grace\n"
+
+
+# Runs for minutes unless the server stops it.
+ENDLESS = "select count(*) from table(generator(rowcount => 100000000000)) where uniform(1, 10, random()) > 0"
+
+
+def test_statement_timeout(connect):
+    cur = connect().cursor()
+    cur.execute("alter session set statement_timeout_in_seconds = 1")
+    started = time.monotonic()
+    with pytest.raises(ProgrammingError) as err:
+        cur.execute(ENDLESS)
+    assert err.value.errno == 630
+    assert err.value.sqlstate == "57014"
+    assert time.monotonic() - started < 10
+    assert cur.execute("select 1").fetchone() == (1,)
+
+
+def test_abort_query_not_running(connect):
+    cur = connect().cursor()
+    qid = cur.execute("select 1").sfqid
+    assert cur.abort_query(qid) is False

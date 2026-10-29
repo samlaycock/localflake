@@ -602,3 +602,76 @@ fn text_binds_range_compared_to_dates_and_timestamps() {
         vec![vec![v("2026-01-01T12:00:00.000+00:00 it's")]]
     );
 }
+
+/// A query that runs for minutes unless something stops it.
+const ENDLESS: &str =
+    "select count(*) from table(generator(rowcount => 100000000000)) where uniform(1, 10, random()) > 0";
+
+/// Runs `sql` on another thread, calls `stop` once it's running, and returns its error and how long it took.
+fn stopped(s: &mut Session, sql: &str, cancel: CancelToken, stop: impl FnOnce(&Engine)) -> (EngineError, f64) {
+    let engine = s.engine.clone();
+    let started = std::time::Instant::now();
+    let error = std::thread::scope(|scope| {
+        let running = scope.spawn(|| s.execute(&Request { sql, cancel, ..Default::default() }).map(|_| ()));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        stop(&engine);
+        running.join().unwrap().expect_err("the query should be stopped").error
+    });
+    (error, started.elapsed().as_secs_f64())
+}
+
+#[test]
+fn cancel_token_stops_a_running_query() {
+    let mut s = session();
+    let cancel = CancelToken::default();
+    let token = cancel.clone();
+    let (error, seconds) = stopped(&mut s, ENDLESS, cancel, |_| token.cancel());
+    assert_eq!((error.code, error.sql_state, error.message.as_str()), ("000604", "57014", "SQL execution canceled"));
+    assert!(seconds < 10.0, "took {seconds}s");
+    assert_eq!(value(&mut s, "select 1"), v("1"));
+}
+
+#[test]
+fn statement_timeout() {
+    let mut s = session();
+    run(&mut s, "alter session set statement_timeout_in_seconds = 1");
+    let started = std::time::Instant::now();
+    let error = fail(&mut s, ENDLESS);
+    assert_eq!(error.code, "000630");
+    assert_eq!(error.message, "Statement reached its statement or warehouse timeout of 1 second(s) and was canceled.");
+    assert!(started.elapsed().as_secs_f64() < 10.0);
+    assert_eq!(value(&mut s, "select 1"), v("1"));
+    run(&mut s, "alter session unset statement_timeout_in_seconds");
+    assert_eq!(value(&mut s, "select count(*) from table(generator(rowcount => 1000))"), v("1000"));
+}
+
+#[test]
+fn system_cancel_query() {
+    let mut s = session();
+    let mut other = s.engine.session(SessionOptions { user: "OTHER".into(), ..Default::default() }).unwrap();
+    assert_eq!(
+        value(&mut other, "select system$cancel_query('01b2c3d4-0000-0000-0000-000000000000')"),
+        v("Identified SQL statement is not currently executing.")
+    );
+    let (error, _) = stopped(&mut s, ENDLESS, CancelToken::default(), |engine| {
+        let id = engine.inner.running.query_ids().remove(0);
+        let sql = format!("select system$cancel_query('{id}')");
+        assert_eq!(value(&mut other, &sql), Some(format!("query [{id}] terminated.")));
+    });
+    assert_eq!(error.code, "000604");
+}
+
+#[test]
+fn cancelled_statement_keeps_the_transaction() {
+    let mut s = session();
+    run(&mut s, "create table t (a int)");
+    run(&mut s, "begin");
+    run(&mut s, "insert into t values (1)");
+    let cancel = CancelToken::default();
+    let token = cancel.clone();
+    let (error, _) = stopped(&mut s, ENDLESS, cancel, |_| token.cancel());
+    assert_eq!(error.code, "000604");
+    run(&mut s, "insert into t values (2)");
+    run(&mut s, "commit");
+    assert_eq!(rows(&mut s, "select a from t order by a"), vec![vec![v("1")], vec![v("2")]]);
+}

@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use localflake_engine::{Engine, QueryResult, Request, Session, SessionOptions};
+use localflake_engine::{CancelToken, Engine, QueryResult, Request, Session, SessionOptions};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -29,6 +29,8 @@ pub struct AppState {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<ClientSession>>>>>,
     /// Parent query ID of a multi-statement request → its statements' results.
     multi_statement: Arc<Mutex<HashMap<String, Vec<Arc<QueryResult>>>>>,
+    /// Requests in progress by the driver's `requestId`: the session token that sent each and its cancel token.
+    requests: Arc<Mutex<HashMap<String, (String, CancelToken)>>>,
     forced_format: Option<ResultFormat>,
 }
 
@@ -76,14 +78,21 @@ impl ClientSession {
 }
 
 pub fn router(engine: Engine, forced_format: Option<ResultFormat>) -> Router {
-    let state = AppState { engine, sessions: Default::default(), multi_statement: Default::default(), forced_format };
+    let state = AppState {
+        engine,
+        sessions: Default::default(),
+        multi_statement: Default::default(),
+        requests: Default::default(),
+        forced_format,
+    };
     Router::new()
         .route("/session/v1/login-request", post(login))
         .route("/session/token-request", post(renew_token))
         .route("/session/heartbeat", post(ok))
         .route("/session", post(delete_session))
         .route("/queries/v1/query-request", post(query))
-        .route("/queries/v1/abort-request", post(ok))
+        .route("/queries/v1/abort-request", post(abort_request))
+        .route("/queries/{id}/abort-request", post(abort_query))
         .route("/queries/{id}/result", get(query_result))
         .route("/monitoring/queries/{id}", get(query_status))
         // The Rust-core connectors join this URL with a doubled slash.
@@ -194,7 +203,12 @@ async fn delete_session(State(state): State<AppState>, headers: HeaderMap) -> Re
     Json(Envelope::ok(Value::Null)).into_response()
 }
 
-async fn query(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn query(
+    State(state): State<AppState>,
+    Query(params): Query<RequestParams>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let Some(client) = client_for(&state, &headers) else { return session_gone() };
     let request: QueryRequest = match decode(&body) {
         Ok(r) => r,
@@ -215,7 +229,16 @@ async fn query(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -
     let multi_statement = state.multi_statement.clone();
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("localhost").to_owned();
     let base_url = format!("http://{host}/__localflake/files/");
+    // Registered before the session lock is taken, so a request can be cancelled
+    // while it waits. The blocking task owns the registration: drivers drop the
+    // HTTP request when they time out, then abort it while the statement runs on.
+    let cancel = CancelToken::default();
+    let request_guard = params
+        .request_id
+        .zip(auth_token(&headers))
+        .map(|(id, session)| RequestGuard::start(&state.requests, id, session, &cancel));
     let response = tokio::task::spawn_blocking(move || {
+        let _request = request_guard;
         let mut client = client.lock().unwrap();
         tracing::info!(session = client.id, sql = %request.sql_text, "query");
         let outcome = client.session.execute(&Request {
@@ -223,6 +246,7 @@ async fn query(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -
             bindings,
             describe_only: request.describe_only,
             statement_count: statement_count.map(|n| n as usize),
+            cancel,
         });
         let results = match outcome {
             Ok(results) => results,
@@ -264,6 +288,72 @@ async fn query(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -
         Ok(envelope) => Json(envelope).into_response(),
         Err(err) => internal(err),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct RequestParams {
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+}
+
+/// Removes a request from `AppState::requests` when it finishes.
+struct RequestGuard {
+    requests: Arc<Mutex<HashMap<String, (String, CancelToken)>>>,
+    request_id: String,
+}
+
+impl RequestGuard {
+    fn start(
+        requests: &Arc<Mutex<HashMap<String, (String, CancelToken)>>>,
+        request_id: String,
+        session: String,
+        cancel: &CancelToken,
+    ) -> Self {
+        requests.lock().unwrap().insert(request_id.clone(), (session, cancel.clone()));
+        Self { requests: requests.clone(), request_id }
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.requests.lock().unwrap().remove(&self.request_id);
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AbortRequest {
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+}
+
+/// `POST /queries/v1/abort-request`: cancels the session's request with the
+/// given `requestId` (drivers do this on timeouts and context cancellation).
+async fn abort_request(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let Some(session) = auth_token(&headers).filter(|t| state.sessions.lock().unwrap().contains_key(t)) else {
+        return session_gone();
+    };
+    let request: AbortRequest = match decode(&body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let token = request.request_id.and_then(|id| match state.requests.lock().unwrap().get(&id) {
+        Some((owner, token)) if *owner == session => Some(token.clone()),
+        _ => None,
+    });
+    let Some(token) = token else { return not_executing() };
+    token.cancel();
+    Json(Envelope::ok(Value::Null)).into_response()
+}
+
+/// `POST /queries/{id}/abort-request`: cancels a running statement by query ID.
+async fn abort_query(State(state): State<AppState>, headers: HeaderMap, Path(query_id): Path<String>) -> Response {
+    if client_for(&state, &headers).is_none() {
+        return session_gone();
+    }
+    if !state.engine.cancel_query(&query_id) {
+        return not_executing();
+    }
+    Json(Envelope::ok(Value::Null)).into_response()
 }
 
 /// `GET /queries/{id}/result`: results of async queries and of each statement in a multi-statement request.
@@ -435,6 +525,11 @@ fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
         body
     };
     serde_json::from_slice(json).map_err(|e| bad_request(format!("invalid request body: {e}")))
+}
+
+/// The abort response for a request that isn't running (drivers retry, then treat it as done).
+fn not_executing() -> Response {
+    Json(Envelope::error("000605", "Identified SQL statement is not currently executing.", Value::Null)).into_response()
 }
 
 fn session_gone() -> Response {

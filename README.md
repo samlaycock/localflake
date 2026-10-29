@@ -127,6 +127,9 @@ real Snowflake disagrees with are bugs in the corpus, so please fix them.
 - Multi-statement requests (`MULTI_STATEMENT_COUNT` / `num_statements`) with
   per-statement child results
 - Async queries (`asyncExec`, `/monitoring/queries/{id}`, `/queries/{id}/result`)
+- Cancellation: driver abort requests (by request ID or query ID),
+  `SYSTEM$CANCEL_QUERY` and `STATEMENT_TIMEOUT_IN_SECONDS`, failing with
+  Snowflake's 000604 and 000630 errors
 - `describeOnly` requests, `RESULT_SCAN(LAST_QUERY_ID())`
 
 **SQL**
@@ -265,6 +268,8 @@ types known.
   Snowflake, but volatile values in those statements (`CURRENT_TIMESTAMP`,
   `RANDOM()`, sequences) are evaluated again. If a replay fails, the next
   `COMMIT` fails (SQLSTATE 40000) rather than losing writes silently.
+- Async queries (`asyncExec`) run to completion before localflake responds,
+  so by the time a driver can abort one by query ID it has already finished.
 - Statements from sessions with different TIMEZONE settings take turns (the
   TIMESTAMP_TZ casts need the zone); sessions sharing a zone run concurrently.
 - Declared lengths of columns added with `ALTER TABLE ... ADD COLUMN` are
