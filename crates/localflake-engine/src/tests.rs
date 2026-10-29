@@ -578,3 +578,27 @@ fn binds_alongside_flatten_and_escapes() {
     assert_eq!(bound(&mut s, ilike, vec![Bind::Text("%title 1%".into())]), vec![vec![v("1")]]);
     assert_eq!(bound(&mut s, r"select ? || 'a\\b'", vec![Bind::Text("x".into())]), vec![vec![v(r"xa\b")]]);
 }
+
+#[test]
+fn text_binds_range_compared_to_dates_and_timestamps() {
+    let mut s = session();
+    run(&mut s, "create table t (d date, ts timestamp_tz)");
+    run(&mut s, "insert into t values ('2026-01-01', '2026-01-01T12:00:00.000+00:00')");
+    let formatted = "to_varchar(ts, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM')";
+    let expected = vec![vec![v("2026-01-01T12:00:00.000+00:00")]];
+    for (filter, bind) in [
+        ("d >= ?", "2025-10-28"),
+        ("d < ?", "2026-10-28"),
+        ("ts >= ?", "2026-01-01T00:00:00.000+00:00"),
+        ("d = ?", "2026-01-01"),
+    ] {
+        let sql = format!("select {formatted} from t where {filter}");
+        assert_eq!(bound(&mut s, &sql, vec![Bind::Text(bind.into())]), expected, "{filter}");
+    }
+    // The probe inlines text binds as literals, so quotes are escaped.
+    let quoted = format!("select {formatted} || ? from t where d >= ?");
+    assert_eq!(
+        bound(&mut s, &quoted, vec![Bind::Text(" it's".into()), Bind::Text("2025-10-28".into())]),
+        vec![vec![v("2026-01-01T12:00:00.000+00:00 it's")]]
+    );
+}
