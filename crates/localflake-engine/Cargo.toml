@@ -2,7 +2,11 @@
 name = "localflake-engine"
 version.workspace = true
 edition.workspace = true
+description = "DuckDB-backed storage and query execution with Snowflake semantics, for localflake"
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 # Compile DuckDB from source. Without it, DuckDB's prebuilt shared library is

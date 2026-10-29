@@ -13,4 +13,4 @@ For changes users won't notice (CI, tests, docs), add an empty one with
 
 When changesets land on `main`, a "Release <version>" pull request collects them
 into the next version and its changelog. Merging that pull request publishes
-the Docker image and the GitHub release. See "Releases" in the README.
+the Docker image and the GitHub release. See "Releases" in [CONTRIBUTING.md](../CONTRIBUTING.md).
