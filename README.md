@@ -10,6 +10,19 @@ scope for now.
 
 ## Running
 
+With Docker (images for linux/amd64 and linux/arm64):
+
+```sh
+docker run --rm -p 8080:8080 ghcr.io/samlaycock/localflake            # in-memory
+docker run --rm -p 8080:8080 -v localflake:/data \
+  -e LOCALFLAKE_DATA_DIR=/data ghcr.io/samlaycock/localflake          # persistent
+```
+
+Every flag has an environment variable (`LOCALFLAKE_ADDR`, `LOCALFLAKE_DATA_DIR`,
+`LOCALFLAKE_RESULT_FORMAT`, `LOCALFLAKE_MISSING_DATABASE`); see `--help`.
+
+From source:
+
 ```sh
 cargo run -- --addr 127.0.0.1:8080                 # in-memory
 cargo run -- --data-dir ./data                     # one DuckDB file per database
@@ -252,6 +265,22 @@ types known.
 - Not implemented: JavaScript/Python/Java UDFs, stored procedures, Snowflake
   Scripting, time travel, streams and tasks.
 - No authentication, roles or access control.
+
+## Releases
+
+Releases are managed with [changesets](https://github.com/changesets/changesets).
+`package.json` holds the version; `npm run version` copies it into the Cargo
+workspace.
+
+1. Every pull request includes a changeset (`npm run changeset`, or
+   `npm run changeset -- --empty` for changes users won't notice). CI checks
+   for one.
+2. On `main`, the release workflow keeps a "chore: release" pull request open
+   that applies the pending changesets: the version bump and `CHANGELOG.md`.
+3. Merging that pull request builds the image natively for amd64 and arm64,
+   pushes `ghcr.io/samlaycock/localflake:<version>`, `:<major>.<minor>` (and
+   `:<major>` from 1.0) and `:latest`, then tags `v<version>` and creates the
+   GitHub release from the changelog.
 
 ## Not affiliated with Snowflake
 
