@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -34,6 +34,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 # Keep target/ small: the bundled DuckDB build is huge with full debug info.
+[profile.release]
+strip = "symbols"
+
 [profile.dev]
 debug = "line-tables-only"
 incremental = false

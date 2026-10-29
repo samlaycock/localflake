@@ -5,3 +5,4 @@ __pycache__/
 *.duckdb
 *.duckdb.wal
 /tests/node/node_modules
+/node_modules
