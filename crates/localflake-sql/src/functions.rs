@@ -125,6 +125,16 @@ CREATE OR REPLACE TEMP MACRO sf_top_k(entries, k) AS
     list_transform(list_slice(list_sort(
         list_transform(entries, lambda e: struct_pack(c := -CAST(e[2] AS BIGINT), t := sf_variant_text(e[1]), e := e))),
         1, k), lambda s: s.e);
+CREATE OR REPLACE TEMP MACRO sf_search_text(x) AS
+    CASE WHEN typeof(x) IN ('VARIANT', 'JSON') OR typeof(x) LIKE '%[]'
+        THEN CAST(CAST(CAST(x AS VARIANT) AS JSON) AS VARCHAR) ELSE CAST(x AS VARCHAR) END;
+CREATE OR REPLACE TEMP MACRO sf_searchable(x) AS
+    typeof(x) IN ('VARCHAR', 'VARIANT', 'JSON') OR typeof(x) LIKE '%[]';
+CREATE OR REPLACE TEMP MACRO sf_search_value(x, q, analyzer, mode) AS
+    CASE WHEN sf_searchable(x)
+        THEN sf_search(sf_search_text(x), typeof(x) <> 'VARCHAR', q, analyzer, mode) ELSE false END;
+CREATE OR REPLACE TEMP MACRO sf_search_ip_value(x, q) AS
+    CASE WHEN sf_searchable(x) THEN sf_search_ip(sf_search_text(x), typeof(x) <> 'VARCHAR', q) ELSE false END;
 CREATE OR REPLACE TEMP MACRO sf_tokens(s, d) AS
     list_filter(string_split_regex(s, '[' || regexp_escape(d) || ']'), lambda t: t <> '');
 CREATE OR REPLACE TEMP MACRO sf_array_to_string(a, sep) AS
@@ -243,6 +253,7 @@ const OBJECT_RESULTS: &[&str] = &[
     "HLL_EXPORT",
     "PARSE_XML",
     "XMLGET",
+    "PARSE_IP",
     "APPROX_PERCENTILE_ACCUMULATE",
     "APPROX_PERCENTILE_COMBINE",
     "APPROX_TOP_K_ACCUMULATE",
@@ -797,6 +808,25 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             )
         }
         "CHECK_XML" => func("sf_check_xml", vec![arg(0)?]),
+        "PARSE_IP" => {
+            let permissive = cast(opt_arg(2)?.unwrap_or_else(|| number(0)), DataType::BigInt(None));
+            cast(func("sf_parse_ip", vec![arg(0)?, arg(1)?, permissive]), custom_type("JSON"))
+        }
+        // SEARCH((col1, col2, ...), 'terms' [, ANALYZER => ...] [, SEARCH_MODE => ...]):
+        // a match in any of the columns (or VARIANT fields).
+        "SEARCH" => {
+            let analyzer = named_arg(f, "ANALYZER").unwrap_or_else(|| string("DEFAULT_ANALYZER"));
+            let mode = named_arg(f, "SEARCH_MODE").unwrap_or_else(|| string("OR"));
+            let (data, query) = (search_items(arg(0)?), arg(1)?);
+            let matches = data
+                .into_iter()
+                .map(|item| func("sf_search_value", vec![item, query.clone(), analyzer.clone(), mode.clone()]));
+            or_all(matches.collect())
+        }
+        "SEARCH_IP" => {
+            let (data, search) = (search_items(arg(0)?), arg(1)?);
+            or_all(data.into_iter().map(|item| func("sf_search_ip_value", vec![item, search.clone()])).collect())
+        }
         "XMLGET" => {
             let object = cast(func("sf_object_json", vec![arg(0)?]), DataType::Varchar(None));
             let instance = opt_arg(2)?.unwrap_or_else(|| number(0));
@@ -1362,6 +1392,26 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         _ => return Ok(None),
     };
     Ok(Some(expr))
+}
+
+/// A named argument (`ANALYZER => 'x'`).
+fn named_arg(f: &Function, wanted: &str) -> Option<Expr> {
+    let FunctionArguments::List(list) = &f.args else { return None };
+    list.args.iter().find_map(|a| match a {
+        FunctionArg::Named { name, arg: FunctionArgExpr::Expr(e), .. } if name.value.eq_ignore_ascii_case(wanted) => {
+            Some(e.clone())
+        }
+        _ => None,
+    })
+}
+
+/// The columns or fields SEARCH looks in: `(a, b)`, `(a)` or `a`.
+fn search_items(data: Expr) -> Vec<Expr> {
+    match data {
+        Expr::Tuple(items) => items,
+        Expr::Nested(item) => vec![*item],
+        item => vec![item],
+    }
 }
 
 /// `name(args)` as an aggregate that keeps `f`'s window, FILTER and DISTINCT.
