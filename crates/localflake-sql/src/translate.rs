@@ -89,6 +89,33 @@ pub struct SqlCommand {
     /// For `MERGE`: the count columns to report, from the actions it has. The
     /// SQL returns one `merge_action` row per affected row.
     pub merge_counts: Vec<(&'static str, &'static str)>,
+    /// For `INSERT`: the target and source, so the engine can apply
+    /// Snowflake's conversions for the target column types.
+    pub insert: Option<InsertParts>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertParts {
+    pub table: String,
+    /// The column list as written (empty: all columns).
+    pub columns: Vec<String>,
+    /// The source query (`VALUES ...` or `SELECT ...`).
+    pub source: String,
+}
+
+impl InsertParts {
+    fn of(insert: &sqlparser::ast::Insert) -> Option<Self> {
+        let TableObject::TableName(name) = &insert.table else { return None };
+        let source = insert.source.as_ref()?;
+        if insert.on.is_some() || insert.returning.is_some() {
+            return None;
+        }
+        Some(Self {
+            table: name.to_string(),
+            columns: insert.columns.iter().map(ToString::to_string).collect(),
+            source: source.to_string(),
+        })
+    }
 }
 
 impl SqlCommand {
@@ -101,6 +128,7 @@ impl SqlCommand {
             status: None,
             result_scans: vec![],
             merge_counts: vec![],
+            insert: None,
         }
     }
 
@@ -311,14 +339,17 @@ fn translate_parsed(statement: Statement, ctx: &Context) -> Result<Command, SqlE
             let status = format!("{} successfully dropped.", last_part(&names[0]));
             return Ok(Command::Sql(SqlCommand::new(statement.to_string(), StatementKind::Ddl).with_status(status)));
         }
-        Statement::CreateSchema { schema_name, if_not_exists, .. } => {
+        Statement::CreateSchema { schema_name, if_not_exists, or_replace, .. } => {
             let name = schema_name.to_string();
             let parts: Vec<String> = name.split('.').map(|p| p.trim_matches('"').to_owned()).collect();
             let (database, schema) = match parts.as_slice() {
                 [db, schema] => (Some(db.clone()), schema.clone()),
                 _ => (None, parts.last().cloned().unwrap_or_default()),
             };
-            let sql = format!("CREATE SCHEMA {}{name}", if *if_not_exists { "IF NOT EXISTS " } else { "" });
+            let mut sql = format!("CREATE SCHEMA {}{name}", if *if_not_exists { "IF NOT EXISTS " } else { "" });
+            if *or_replace {
+                sql = format!("DROP SCHEMA IF EXISTS {name} CASCADE; {sql}");
+            }
             return Ok(Command::CreateSchema { sql, database, schema });
         }
         Statement::CreateTable(_) => return render_create_table(statement, ctx).map(Command::Sql),
@@ -372,12 +403,18 @@ fn translate_parsed(statement: Statement, ctx: &Context) -> Result<Command, SqlE
                 TableObject::TableName(name) => name.to_string(),
                 other => return Err(SqlError::Unsupported(format!("INSERT OVERWRITE INTO {other}"))),
             };
+            let parts = InsertParts::of(&insert);
             let mut sql = SqlCommand::new(Statement::Insert(insert).to_string(), StatementKind::Insert);
             sql.pre.push(format!("DELETE FROM {table}"));
+            sql.insert = parts;
+            return Ok(Command::Sql(sql));
+        }
+        Statement::Insert(insert) => {
+            let mut sql = SqlCommand::new(statement.to_string(), StatementKind::Insert);
+            sql.insert = InsertParts::of(insert);
             return Ok(Command::Sql(sql));
         }
         Statement::Query(_) | Statement::Explain { .. } | Statement::ExplainTable { .. } => StatementKind::Query,
-        Statement::Insert(_) => StatementKind::Insert,
         Statement::Update(_) => StatementKind::Update,
         Statement::Delete(_) => StatementKind::Delete,
         Statement::CreateSequence { name, .. } => {
@@ -422,6 +459,16 @@ fn preprocess_tokens(sql: &str) -> Result<String, SqlError> {
     let next_significant =
         |tokens: &[Token], from: usize| (from..tokens.len()).find(|&j| !matches!(tokens[j], Token::Whitespace(_)));
     let mut changed = false;
+    // Number positional `?` binds, so a rewrite that repeats an operand (a
+    // cast becomes `CASE WHEN f(x) ... ELSE g(x) END`) still reads one bind.
+    let mut binds = 0;
+    for token in tokens.iter_mut() {
+        if matches!(token, Token::Placeholder(p) if p == "?") {
+            binds += 1;
+            *token = Token::Placeholder(format!(":{binds}"));
+            changed = true;
+        }
+    }
     let mut i = 0;
     while i < tokens.len() {
         // `t.$1`: a qualified positional column (see `rewrite`'s placeholder handling).

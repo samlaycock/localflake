@@ -232,3 +232,27 @@ CODE|VARCHAR(3)|NULL
 NAME|VARCHAR(5)|NULL
 NOTE|VARCHAR(2)|short
 RAW|BINARY(4)|NULL
+
+statement ok
+create or replace schema replaced
+
+statement ok
+create or replace schema replaced
+
+error 002002
+create schema replaced
+
+error 002002
+create table public.lens (x int)
+
+statement ok
+create table ltz_text (t timestamp_ltz, n varchar)
+
+statement ok
+insert into ltz_text values ('2024-01-02 03:04:05 +00:00', 'a'), ('2024-01-02 03:04:05.500 -0800', 'b')
+
+query
+select n, convert_timezone('UTC', t)::timestamp_ntz from ltz_text order by n
+----
+a|2024-01-02 03:04:05
+b|2024-01-02 11:04:05.5

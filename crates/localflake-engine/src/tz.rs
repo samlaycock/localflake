@@ -228,6 +228,17 @@ unsafe extern "C" fn varchar_to_tz(
     output: ffi::duckdb_vector,
 ) -> bool {
     let zone = session_zone();
+    unsafe { map_text(info, count, input, output, |text| parse(text, zone)) }
+}
+
+/// Runs `convert` over a VARCHAR input vector, writing microsecond values.
+unsafe fn map_text(
+    info: ffi::duckdb_function_info,
+    count: ffi::idx_t,
+    input: ffi::duckdb_vector,
+    output: ffi::duckdb_vector,
+    convert: impl Fn(&str) -> Result<i64, String>,
+) -> bool {
     unsafe {
         let data = ffi::duckdb_vector_get_data(input) as *mut ffi::duckdb_string_t;
         let out = ffi::duckdb_vector_get_data(output) as *mut i64;
@@ -243,7 +254,7 @@ unsafe extern "C" fn varchar_to_tz(
             let len = ffi::duckdb_string_t_length(*value) as usize;
             let bytes = std::slice::from_raw_parts(ffi::duckdb_string_t_data(value) as *const u8, len);
             let text = String::from_utf8_lossy(bytes);
-            match parse(&text, zone) {
+            match convert(&text) {
                 Ok(v) => out.add(row as usize).write(v),
                 Err(_) => return fail(info, &format!("Timestamp '{text}' is not recognized"), row, output),
             }

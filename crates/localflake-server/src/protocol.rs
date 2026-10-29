@@ -130,7 +130,15 @@ fn bind_value(kind: &str, value: &Value) -> Result<Bind, String> {
         // Times and timestamps are nanoseconds (TIMESTAMP_TZ appends an offset).
         "TIME" => Bind::Time(int(&text)?.div_euclid(1000)),
         "TIMESTAMP_NTZ" => Bind::Timestamp(int(&text)?.div_euclid(1000)),
-        "TIMESTAMP_LTZ" | "TIMESTAMP_TZ" => Bind::TimestampTz(int(&text)?.div_euclid(1000)),
+        "TIMESTAMP_LTZ" => Bind::TimestampLtz(int(&text)?.div_euclid(1000)),
+        // `<nanoseconds> <offset in minutes + 1440>`.
+        "TIMESTAMP_TZ" => {
+            let offset = match text.split_whitespace().nth(1) {
+                Some(o) => o.parse::<i32>().map_err(|e| format!("invalid TIMESTAMP_TZ bind '{text}': {e}"))? - 1440,
+                None => 0,
+            };
+            Bind::TimestampTz { micros: int(&text)?.div_euclid(1000), offset_minutes: offset }
+        }
         "BINARY" => Bind::Binary(hex_decode(&text)?),
         _ => Bind::Text(text),
     })
@@ -382,11 +390,19 @@ mod tests {
             "3": {"type": "DATE", "value": "86400000"},
             "4": {"type": "TIMESTAMP_NTZ", "value": "1500000000"},
             "5": {"type": "TEXT", "value": null},
+            "6": {"type": "TIMESTAMP_TZ", "value": "1500000000 1560"},
         }))
         .unwrap();
         assert_eq!(
             bind_rows(&bindings).unwrap(),
-            vec![vec![Bind::Int(42), Bind::Text("x".into()), Bind::Date(1), Bind::Timestamp(1_500_000), Bind::Null]]
+            vec![vec![
+                Bind::Int(42),
+                Bind::Text("x".into()),
+                Bind::Date(1),
+                Bind::Timestamp(1_500_000),
+                Bind::Null,
+                Bind::TimestampTz { micros: 1_500_000, offset_minutes: 120 },
+            ]]
         );
     }
 

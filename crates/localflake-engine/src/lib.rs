@@ -169,9 +169,58 @@ pub enum Bind {
     Time(i64),
     /// Microseconds since the epoch, wall-clock.
     Timestamp(i64),
-    /// Microseconds since the epoch, UTC instant.
-    TimestampTz(i64),
+    /// Microseconds since the epoch, UTC instant (TIMESTAMP_LTZ).
+    TimestampLtz(i64),
+    /// An instant (microseconds since the epoch) and its UTC offset (TIMESTAMP_TZ).
+    TimestampTz {
+        micros: i64,
+        offset_minutes: i32,
+    },
     Binary(Vec<u8>),
+}
+
+/// Converts placeholders whose binds can't be bound with their own type
+/// (see `Bind::to_value`): `$n` becomes `make_timestamp_ns($n)` for
+/// TIMESTAMP_TZ and the instant of that for TIMESTAMP_LTZ.
+fn typed_placeholders(sql: &str, binds: &[Bind]) -> String {
+    let wrap = |n: usize| match binds.get(n.wrapping_sub(1)) {
+        Some(Bind::TimestampLtz(_)) => Some(format!("sf_tz_instant(make_timestamp_ns(${n}))")),
+        Some(Bind::TimestampTz { .. }) => Some(format!("make_timestamp_ns(${n})")),
+        _ => None,
+    };
+    if !binds.iter().any(|b| matches!(b, Bind::TimestampLtz(_) | Bind::TimestampTz { .. })) {
+        return sql.to_owned();
+    }
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + 32);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'\'' | b'"') => {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j] != quote {
+                    j += 1;
+                }
+                out.push_str(&sql[i..(j + 1).min(bytes.len())]);
+                i = j + 1;
+            }
+            b'$' if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) => {
+                let len = bytes[i + 1..].iter().take_while(|b| b.is_ascii_digit()).count();
+                let n: usize = sql[i + 1..i + 1 + len].parse().unwrap_or(0);
+                match wrap(n) {
+                    Some(text) => out.push_str(&text),
+                    None => out.push_str(&sql[i..i + 1 + len]),
+                }
+                i += 1 + len;
+            }
+            _ => {
+                let c = sql[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
 }
 
 impl Bind {
@@ -185,7 +234,11 @@ impl Bind {
             Bind::Float(f) => Value::Double(*f),
             Bind::Date(d) => Value::Date32(*d),
             Bind::Time(t) => Value::Time64(Microsecond, *t),
-            Bind::Timestamp(t) | Bind::TimestampTz(t) => Value::Timestamp(Microsecond, *t),
+            Bind::Timestamp(t) => Value::Timestamp(Microsecond, *t),
+            // duckdb-rs binds timestamps as microseconds, so these go as the
+            // encoded TIMESTAMP_TZ value and `typed_placeholders` converts them.
+            Bind::TimestampLtz(t) => Value::BigInt(tz::encode(*t, 0)),
+            Bind::TimestampTz { micros, offset_minutes } => Value::BigInt(tz::encode(*micros, offset_minutes * 60)),
             Bind::Binary(b) => Value::Blob(b.clone()),
         }
     }
@@ -689,7 +742,8 @@ impl Session {
                 for pre in &command.pre {
                     self.conn.execute_batch(pre)?;
                 }
-                let mut stmt = self.conn.prepare(&command.sql)?;
+                let sql = typed_placeholders(&command.sql, bindings.first().map(Vec::as_slice).unwrap_or_default());
+                let mut stmt = self.conn.prepare(&sql)?;
                 let mut actions: HashMap<String, i64> = HashMap::new();
                 let rows: Vec<Vec<Bind>> = if bindings.is_empty() { vec![vec![]] } else { bindings.to_vec() };
                 for row in &rows {
@@ -712,7 +766,12 @@ impl Session {
                 for pre in &command.pre {
                     self.conn.execute_batch(pre)?;
                 }
-                let mut stmt = self.conn.prepare(&command.sql)?;
+                let sql = match &command.insert {
+                    Some(parts) => self.convert_insert(parts, &command.sql, bindings.first())?,
+                    None => command.sql.clone(),
+                };
+                let sql = typed_placeholders(&sql, bindings.first().map(Vec::as_slice).unwrap_or_default());
+                let mut stmt = self.conn.prepare(&sql)?;
                 let mut total = 0;
                 if bindings.is_empty() {
                     total += stmt.execute([])?;
@@ -744,6 +803,8 @@ impl Session {
         kind: StatementKind,
     ) -> Result<QueryResult, EngineError> {
         let values: Vec<Value> = params.iter().map(Bind::to_value).collect();
+        let typed = typed_placeholders(sql, params);
+        let sql = typed.as_str();
         let mut stmt = self.conn.prepare(sql)?;
 
         // duckdb-rs can't decode VARIANT, and nested types have no Snowflake
@@ -813,6 +874,68 @@ impl Session {
         let schema = arrow.get_schema();
         let batches: Vec<_> = arrow.collect();
         Ok(QueryResult::from_arrow(query_id.to_owned(), &schema, batches, &semi, kind))
+    }
+
+    /// Applies Snowflake's conversions to inserted values where DuckDB's
+    /// differ: text going into TIMESTAMP_LTZ columns is parsed like
+    /// `::TIMESTAMP_LTZ` (DuckDB reads `... 03:04:05 +00:00` as a zone name).
+    fn convert_insert(
+        &self,
+        parts: &localflake_sql::InsertParts,
+        sql: &str,
+        params: Option<&Vec<Bind>>,
+    ) -> Result<String, EngineError> {
+        let describe = |query: &str, params: Option<&Vec<Bind>>| -> Result<Vec<(String, String)>, EngineError> {
+            let values: Vec<Value> = params.map(|p| p.iter().map(Bind::to_value).collect()).unwrap_or_default();
+            let query = typed_placeholders(query, params.map(Vec::as_slice).unwrap_or_default());
+            let mut stmt = self.conn.prepare(&format!("DESCRIBE {query}"))?;
+            let rows = stmt.query_map(duckdb::params_from_iter(values), |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        };
+        let table = describe(&parts.table, None)?;
+        let unquote = |name: &str| name.trim_matches('"').replace("\"\"", "\"");
+        let targets: Vec<(String, String)> = if parts.columns.is_empty() {
+            table.clone()
+        } else {
+            parts
+                .columns
+                .iter()
+                .map(|c| {
+                    let name = unquote(c);
+                    let ty = table.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name)).map(|(_, t)| t.clone());
+                    (name, ty.unwrap_or_default())
+                })
+                .collect()
+        };
+        if !targets.iter().any(|(_, ty)| ty == "TIMESTAMP WITH TIME ZONE") {
+            return Ok(sql.to_owned());
+        }
+        let source = describe(&parts.source, params)?;
+        if source.len() != targets.len() {
+            return Ok(sql.to_owned());
+        }
+        let aliases: Vec<String> = (0..targets.len()).map(|i| format!("__lf_c{i}")).collect();
+        let values: Vec<String> = targets
+            .iter()
+            .zip(&source)
+            .zip(&aliases)
+            .map(|(((_, target), (_, source)), alias)| {
+                if target == "TIMESTAMP WITH TIME ZONE" && source == "VARCHAR" {
+                    format!("sf_ltz({alias})")
+                } else {
+                    alias.clone()
+                }
+            })
+            .collect();
+        let columns: Vec<String> = targets.iter().map(|(n, _)| ident(n)).collect();
+        Ok(format!(
+            "INSERT INTO {} ({}) SELECT {} FROM ({}) AS __lf_src({})",
+            parts.table,
+            columns.join(", "),
+            values.join(", "),
+            parts.source,
+            aliases.join(", ")
+        ))
     }
 
     /// Result column names without executing the query.
