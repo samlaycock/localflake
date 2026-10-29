@@ -6,3 +6,4 @@ __pycache__/
 *.duckdb.wal
 /tests/node/node_modules
 /node_modules
+.DS_Store
