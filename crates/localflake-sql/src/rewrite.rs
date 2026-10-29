@@ -557,6 +557,15 @@ impl Rewriter<'_> {
                 cast(Expr::Value(typed.value.clone()), target)
             }
             Expr::Function(f) => return functions::rewrite(f, self.ctx),
+            // sqlparser parses SUBSTR/SUBSTRING into their own node; rewrite them as calls.
+            Expr::Substring { expr: value, substring_from, substring_for, .. } => {
+                let args = std::iter::once(take(value))
+                    .chain(substring_from.take().map(|e| *e))
+                    .chain(substring_for.take().map(|e| *e))
+                    .collect();
+                let Expr::Function(mut call) = func("SUBSTR", args) else { unreachable!() };
+                return Ok(Some(functions::rewrite(&mut call, self.ctx)?.unwrap_or(Expr::Function(call))));
+            }
             Expr::Identifier(ident) if ident.quote_style.is_none() && is_niladic(&ident.value) => {
                 let mut call = match func(&ident.value, vec![]) {
                     Expr::Function(f) => f,

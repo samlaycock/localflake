@@ -389,3 +389,53 @@ query
 select search(parse_json('{"a": "hello world", "b": 1}'), 'world'), search(null::varchar, 'x'), search(1, 'x')
 ----
 true|NULL|false
+
+statement ok
+set passphrase = 'poiuqewjlkfsd'
+
+query
+select to_varchar(decrypt(encrypt('Patient tested positive for COVID-19', $passphrase), $passphrase), 'utf-8'), to_varchar(decrypt(encrypt('penicillin', $passphrase, 'John Dough AAD', 'aes-gcm'), $passphrase, 'John Dough AAD', 'aes-gcm'), 'utf-8')
+----
+Patient tested positive for COVID-19|penicillin
+
+error 100311
+select decrypt(encrypt('penicillin', $passphrase, 'John Dough AAD', 'aes-gcm'), $passphrase, 'wrong patient AAD', 'aes-gcm')
+
+query
+select try_decrypt(encrypt('penicillin', $passphrase), 'wrong'), to_varchar(decrypt(encrypt(to_binary(hex_encode('secret!')), 'sample_passphrase', null, 'aes-cbc/pad:pkcs'), 'sample_passphrase', null, 'aes-cbc/pad:pkcs'), 'utf-8')
+----
+NULL|secret!
+
+statement ok
+create table binary_table (encryption_key binary, initialization_vector binary(12), binary_column binary, encrypted_binary_column variant, aad_column binary)
+
+statement ok
+insert into binary_table (encryption_key, initialization_vector, binary_column, aad_column) select sha2_binary('NotSecretEnough', 256), substr(to_binary(hex_encode('AlsoNotSecretEnough'), 'HEX'), 0, 12), to_binary(hex_encode('Bonjour'), 'HEX'), to_binary(hex_encode('additional data'), 'HEX')
+
+statement ok
+update binary_table set encrypted_binary_column = encrypt_raw(binary_column, encryption_key, initialization_vector, aad_column, 'AES-GCM')
+
+query
+select hex_encode(as_binary(get(encrypted_binary_column, 'ciphertext'))), hex_encode(as_binary(get(encrypted_binary_column, 'iv'))), hex_encode(as_binary(get(encrypted_binary_column, 'tag'))) from binary_table
+----
+CA2F4A383F6F55|416C736F4E6F745365637265|91F28FBC6A2FE9B213D1C44B8D75D147
+
+query
+select hex_decode_string(to_varchar(decrypt_raw(as_binary(get(encrypted_binary_column, 'ciphertext')), encryption_key, as_binary(get(encrypted_binary_column, 'iv')), aad_column, 'AES-GCM', as_binary(get(encrypted_binary_column, 'tag'))))) from binary_table
+----
+Bonjour
+
+query
+select try_decrypt_raw(as_binary(get(encrypted_binary_column, 'ciphertext')), encryption_key, as_binary(get(encrypted_binary_column, 'iv')), to_binary('00', 'HEX'), 'AES-GCM', as_binary(get(encrypted_binary_column, 'tag'))) from binary_table
+----
+NULL
+
+query
+select substr('abcdef', 0, 2), substr('abcdef', 2), substring('abcdef', -2), hex_encode(substr(to_binary('0102030405', 'HEX'), 2, 3)), hex_encode(substr(to_binary('0102030405', 'HEX'), 0, 2))
+----
+ab|bcdef|ef|020304|0102
+
+query
+select to_varchar(to_binary('Hi', 'utf-8'), 'utf-8'), to_varchar(to_binary('Hi', 'utf-8'), 'hex'), to_varchar(to_binary('Hi', 'utf-8'), 'base64')
+----
+Hi|4869|SGk=

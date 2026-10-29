@@ -5,6 +5,7 @@
 //! gets its own DuckDB connection, so `USE` and session settings stay local.
 
 mod cancel;
+mod crypt;
 mod encode;
 mod error;
 mod files;

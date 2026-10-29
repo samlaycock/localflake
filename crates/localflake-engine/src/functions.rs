@@ -46,6 +46,10 @@ pub fn register(conn: &Connection) -> duckdb::Result<()> {
     conn.register_scalar_function::<crate::search::ParseIp>("sf_parse_ip")?;
     conn.register_scalar_function::<crate::search::SearchIp>("sf_search_ip")?;
     conn.register_scalar_function::<crate::search::Search>("sf_search")?;
+    conn.register_scalar_function::<crate::crypt::Encrypt>("sf_encrypt")?;
+    conn.register_scalar_function::<crate::crypt::Decrypt>("sf_decrypt")?;
+    conn.register_scalar_function::<crate::crypt::EncryptRaw>("sf_encrypt_raw")?;
+    conn.register_scalar_function::<crate::crypt::DecryptRaw>("sf_decrypt_raw")?;
     conn.register_scalar_function::<Sha2>("sf_sha2")?;
     conn.register_scalar_function::<InitCap>("sf_initcap")?;
     conn.register_scalar_function::<ParseUrl>("sf_parse_url")?;

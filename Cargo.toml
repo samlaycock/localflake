@@ -26,7 +26,14 @@ chrono-tz = "0.10"
 # CI and Docker link against DuckDB's prebuilt library instead.
 duckdb = { version = "1.20000", features = ["vscalar", "vscalar-arrow", "appender-arrow"] }
 flate2 = "1"
+aes = "0.9"
+aes-gcm = "0.11"
+cbc = { version = "0.2", features = ["alloc"] }
+cfb-mode = "0.9"
+ctr = "0.10"
+ecb = { version = "0.2", features = ["alloc"] }
 md5 = { package = "md-5", version = "0.11" }
+ofb = "0.7"
 sha2 = "0.11"
 quick-xml = "0.42"
 regex = "1"
