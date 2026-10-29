@@ -174,3 +174,110 @@ select x, interpolate_linear(y) over (order by x) from (select column1 x, column
 
 error
 select interpolate_bfill(temperature) over (partition by city order by observed rows between 1 preceding and 1 following) from temps
+
+statement ok
+create table seq_demo (c1 int)
+
+statement ok
+insert into seq_demo select seq4() + 1 from table(generator(rowcount => 8))
+
+statement ok
+create table hll_1 as select hll_accumulate(c1) as rs1 from seq_demo
+
+statement ok
+create table hll_2 as select hll_accumulate(c1 + 4) as rs1 from seq_demo
+
+query
+select hll_estimate(hll_combine(rs1)) from (select rs1 from hll_1 union all select rs1 from hll_2)
+----
+12
+
+query
+select hll_estimate(hll_import(hll_export(hll_accumulate(c1)))), hll_estimate(hll_accumulate(c1)) = hll(c1) from seq_demo
+----
+8|true
+
+statement ok
+create table pct_1 as select approx_percentile_accumulate(column1) as rs1 from values (1), (2), (3), (4)
+
+statement ok
+create table pct_2 as select approx_percentile_accumulate(column1) as rs1 from values (5), (6), (7), (8)
+
+query
+select approx_percentile_estimate(rs1, 0.5) from pct_1
+----
+2.5
+
+query
+select approx_percentile_estimate(approx_percentile_combine(rs1), 0.5) from (select rs1 from pct_1 union all select rs1 from pct_2)
+----
+4.5
+
+statement ok
+create table topk_1 as select approx_top_k_accumulate(c1, 50) as rs1 from seq_demo
+
+statement ok
+create table topk_2 as select approx_top_k_accumulate(c1 + 4, 50) as rs1 from seq_demo
+
+query
+select approx_top_k_estimate(approx_top_k_combine(rs1), 4) from (select rs1 from topk_1 union all select rs1 from topk_2)
+----
+[[5,2],[6,2],[7,2],[8,2]]
+
+statement ok
+create table ta (i integer)
+
+statement ok
+insert into ta select seq4() + 1 from table(generator(rowcount => 10))
+
+query
+select approximate_similarity(mh) from (select minhash(100, i) mh from ta union all select minhash(100, i) mh from ta)
+----
+1
+
+query
+select approximate_jaccard_index(mh) from (select minhash(100, i) mh from ta union all select minhash(100, -i) mh from ta)
+----
+0
+
+query
+select mh:type, mh:version, array_size(mh:state) from (select minhash(5, i) mh from ta)
+----
+"minhash"|1|5
+
+query
+select approximate_similarity(mh) from (select minhash_combine(mh) mh from (select minhash(100, i) mh from ta where i <= 5 union all select minhash(100, i) from ta where i > 5) union all select minhash(100, i) from ta)
+----
+1
+
+query
+select bitmap_bucket_number(1), bitmap_bit_position(1), bitmap_bucket_number(32768), bitmap_bit_position(32768), bitmap_bucket_number(32769), bitmap_bit_position(32769)
+----
+1|0|1|32767|2|0
+
+statement ok
+create table bitmap_test_values (val int)
+
+statement ok
+insert into bitmap_test_values values (1), (32769), (32769), (1), (2), (3), (4)
+
+query rowsort
+select bitmap_bucket_number(val) as bitmap_id, bitmap_construct_agg(bitmap_bit_position(val)) as bitmap, bitmap_count(bitmap_construct_agg(bitmap_bit_position(val))) from bitmap_test_values group by bitmap_id
+----
+1|00040000010002000300|4
+2|00010000000000000000|1
+
+statement ok
+create table events (user_id int, value int)
+
+statement ok
+insert into events values (1, 1), (1, 5), (1, 100), (2, 5), (2, 100), (2, 50000), (3, 1), (3, 2), (3, 3), (3, 5)
+
+statement ok
+create table user_bitmaps as select user_id, bitmap_bucket_number(value) as bucket, bitmap_construct_agg(bitmap_bit_position(value)) as bmp from events group by user_id, bucket
+
+query rowsort
+select bucket, bitmap_to_array(bitmap_and_agg(bmp), bucket), bitmap_count(bitmap_or_agg(bmp)) from user_bitmaps group by bucket
+----
+1|[5]|5
+2|[50000]|1
