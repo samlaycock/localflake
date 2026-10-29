@@ -1,8 +1,9 @@
 name: Release
 
 # On every push to main:
-# 1. changesets opens or updates the "chore: release" pull request, which turns
-#    pending changesets into a version bump and CHANGELOG entry;
+# 1. changesets opens or updates the "Release <version>" pull request, which
+#    turns pending changesets into a version bump and CHANGELOG entry, and CI
+#    (including the Docker build check) is dispatched on it;
 # 2. once that pull request is merged (main has a version without a tag), the
 #    Docker image is built for each platform and published to GHCR, then the
 #    commit is tagged v<version> and a GitHub release created from the changelog.
@@ -26,6 +27,7 @@ jobs:
     name: Release pull request
     runs-on: ubuntu-24.04
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     outputs:
@@ -46,9 +48,20 @@ jobs:
         with:
           version: npm run version
           commit: "chore: release"
-          title: "chore: release"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Name the release pull request and run CI on it
+        if: steps.changesets.outputs.pullRequestNumber
+        run: |
+          git fetch --quiet origin changeset-release/main
+          version=$(git show FETCH_HEAD:package.json | jq -r .version)
+          gh pr edit "$PR" --title "Release $version"
+          # Pull requests opened with GITHUB_TOKEN don't trigger workflows,
+          # but a dispatch does, and its checks show on the pull request.
+          gh workflow run ci.yml --ref changeset-release/main
+        env:
+          PR: ${{ steps.changesets.outputs.pullRequestNumber }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Check for an unreleased version
         id: check
         if: steps.changesets.outputs.hasChangesets == 'false'

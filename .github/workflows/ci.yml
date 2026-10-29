@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The release workflow dispatches CI on the release pull request's branch.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -49,7 +51,9 @@ jobs:
         run: go test ./...
 
   docker:
-    name: Docker image builds
+    name: Docker build (no push)
+    # Only release pull requests: the image is only published from them.
+    if: github.ref_name == 'changeset-release/main' || github.head_ref == 'changeset-release/main'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
