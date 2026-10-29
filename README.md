@@ -1,43 +1,86 @@
 # localflake
 
-A local Snowflake emulator, written in Rust on top of DuckDB. It implements the
-HTTP protocol Snowflake's official drivers speak, so applications connect by
-pointing the driver at localflake instead of `<account>.snowflakecomputing.com`.
+[![CI](https://github.com/samlaycock/localflake/actions/workflows/ci.yml/badge.svg)](https://github.com/samlaycock/localflake/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/samlaycock/localflake)](https://github.com/samlaycock/localflake/releases)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-Scope: core storage and querying with Snowflake SQL semantics, plus stages and
-data loading. Streams, tasks, time travel, non-SQL UDFs and Snowpark are out of
-scope for now.
+A local Snowflake emulator for offline development and testing, written in Rust
+on top of DuckDB. It implements the HTTP protocol Snowflake's official drivers
+speak, so your application connects by pointing its driver at localflake instead
+of `<account>.snowflakecomputing.com`. No Snowflake account, network access or
+code changes are needed.
 
-## Running
+- **Works with the official drivers.** Python (`snowflake-connector-python`),
+  Node.js (`snowflake-sdk`) and Go (`gosnowflake`) are tested in CI against a
+  shared conformance spec, with both Arrow and JSON results.
+- **Snowflake SQL semantics, not just syntax.** Identifier case rules, `NUMBER`
+  scales, decimal division, NULL ordering, `VARIANT` paths, `TIMESTAMP_TZ`
+  offsets and session time zones behave as they do in Snowflake, and errors
+  carry Snowflake's error codes and SQLSTATEs.
+- **Several hundred functions and the query syntax apps use**, including
+  `QUALIFY`, `FLATTEN`, `PIVOT`, `MATCH_RECOGNIZE`, `CONNECT BY`, `MERGE`,
+  `ASOF JOIN` and SQL UDFs.
+- **Stages and data loading.** `PUT`/`GET` through the drivers, `COPY INTO`
+  tables and stages for CSV, JSON and Parquet, and queries over staged files.
+- **Transactions, multi-statement requests, async queries, bind variables and
+  `RESULT_SCAN`.**
+- **One binary or Docker image, in memory or persistent.** Optionally keeps one
+  DuckDB file per database, and never needs the network at runtime.
 
-With Docker (images for linux/amd64 and linux/arm64):
+> [!WARNING]
+> localflake is for development and testing only. It accepts any credentials,
+> has no access control, and is not a database for real data. It aims to behave
+> like Snowflake for the features it implements, but it is not Snowflake: test
+> against a real account before relying on behaviour in production.
+
+## Contents
+
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Supported drivers](#supported-drivers)
+- [What works](#what-works)
+- [Stages and file transfer](#stages-and-file-transfer)
+- [How Snowflake types are stored](#how-snowflake-types-are-stored)
+- [Known differences](#known-differences)
+- [Configuration](#configuration)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Installation
+
+**Docker** (linux/amd64 and linux/arm64):
 
 ```sh
-docker run --rm -p 8080:8080 ghcr.io/samlaycock/localflake            # in-memory
+docker run --rm -p 8080:8080 ghcr.io/samlaycock/localflake            # in memory
 docker run --rm -p 8080:8080 -v localflake:/data \
   -e LOCALFLAKE_DATA_DIR=/data ghcr.io/samlaycock/localflake          # persistent
 ```
 
-Every flag has an environment variable (`LOCALFLAKE_ADDR`, `LOCALFLAKE_DATA_DIR`,
-`LOCALFLAKE_RESULT_FORMAT`, `LOCALFLAKE_MISSING_DATABASE`); see `--help`.
+The image is tagged `:<version>`, `:<major>.<minor>` (and `:<major>` from 1.0)
+and `:latest`. It runs as a non-root user and listens on `0.0.0.0:8080`. Pass
+flags after the image name, e.g. `docker run … ghcr.io/samlaycock/localflake
+--missing-database ignore`.
 
-From source:
+**From source** (needs a recent stable Rust toolchain and a C++ compiler):
 
 ```sh
-cargo run -- --addr 127.0.0.1:8080                 # in-memory
-cargo run -- --data-dir ./data                     # one DuckDB file per database
-RUST_LOG=localflake_engine=debug cargo run         # log translated SQL
+cargo install --git https://github.com/samlaycock/localflake localflake-server --locked
+localflake
 ```
 
-Time zones use DuckDB's ICU extension, which is embedded in the binary at
-build time, so localflake never needs the network at runtime. The build takes
-it from `LOCALFLAKE_ICU_EXTENSION` (a path, for offline builds), DuckDB's own
-cache in `~/.duckdb/extensions`, or a one-off download from
-extensions.duckdb.org. If none is available the build still succeeds and
-localflake installs ICU on first start instead; `LOCALFLAKE_NO_ICU=1` runs
-everything in UTC.
+This compiles DuckDB from source, which takes several minutes. Or clone the
+repository and run `cargo run --release`. [CONTRIBUTING.md](CONTRIBUTING.md)
+explains how to link DuckDB's prebuilt library instead.
 
-Connect with any credentials:
+## Quick start
+
+Start localflake with either command above. It serves `http://127.0.0.1:8080`.
+
+Point your driver at it with `host`, `port` and `protocol`, and use any account,
+user and password. The database you log in with is created if it doesn't exist.
+
+**Python** (`snowflake-connector-python`):
 
 ```python
 import snowflake.connector
@@ -45,74 +88,52 @@ import snowflake.connector
 conn = snowflake.connector.connect(
     account="localflake", user="dev", password="dev",
     host="127.0.0.1", port=8080, protocol="http",
-    database="MY_DB",  # created on first login
+    database="MY_DB",
 )
+print(conn.cursor().execute("select current_database(), 1 / 3").fetchone())
+# ('MY_DB', Decimal('0.333333'))
 ```
 
-## Layout
+**Node.js** (`snowflake-sdk`):
 
-| Crate | Role |
-|---|---|
-| `localflake-server` | Driver protocol over HTTP (axum): login, sessions, `query-request`, response encoding |
-| `localflake-engine` | DuckDB sessions, Snowflake databases as attached DuckDB catalogs, result encoding, error code mapping |
-| `localflake-sql` | Snowflake SQL → DuckDB: identifier case normalization, parsing (sqlparser-rs), statement classification and rewrites |
+```js
+import snowflake from "snowflake-sdk";
 
-Requests flow server → engine → sql → DuckDB, and the Arrow results go back
-through the engine's encoder into Snowflake's `rowtype`/`rowset` format.
-
-## Testing
-
-```sh
-cargo test --workspace                              # unit tests and the conformance corpus, no server
-cargo build                                         # the end-to-end suites start target/debug/localflake
-(cd tests/python && uv run pytest)                  # official Python connector (Arrow and JSON)
-(cd tests/node && npm ci && npm test)               # official Node.js driver (JSON)
-(cd tests/go && go test -count=1 ./...)             # gosnowflake (Arrow and JSON)
+const conn = snowflake.createConnection({
+  account: "localflake", username: "dev", password: "dev",
+  accessUrl: "http://127.0.0.1:8080",
+  database: "MY_DB",
+});
+await conn.connectAsync();
 ```
 
-Set `LOCALFLAKE_BIN` to test a different binary.
+**Go** (`gosnowflake`):
 
-Builds compile DuckDB from source by default (the engine's `bundled` feature),
-which takes several minutes. To link DuckDB's prebuilt library instead, as CI
-and the Docker image do, build without default features; the library for the
-pinned release is downloaded automatically, and the rpath tells binaries where
-to find it:
-
-```sh
-LIB=$PWD/target/duckdb-download/$(rustc -vV | sed -n 's/host: //p')/v2.0.0
-RUSTFLAGS="-C link-arg=-Wl,-rpath,$LIB" cargo test --workspace --no-default-features
+```go
+// import sf "github.com/snowflakedb/gosnowflake/v2"
+dsn, _ := sf.DSN(&sf.Config{
+	Account: "localflake", User: "dev", Password: "dev",
+	Host: "127.0.0.1", Port: 8080, Protocol: "http",
+	Database: "MY_DB",
+})
+db, _ := sql.Open("snowflake", dsn)
 ```
 
-The three officially supported drivers share a conformance spec
-(`tests/conformance/cases.json`) that each suite runs through its driver, so
-they get the same coverage. `tests/README.md` describes the spec, the
-driver-specific tests and the known differences between the drivers.
+In Docker Compose or CI, run the image as a service and use its hostname as
+`host`.
 
-### Conformance corpus
+## Supported drivers
 
-`crates/localflake-engine/tests/corpus/*.test` holds Snowflake SQL with the
-results Snowflake gives, grouped by area (numeric, string, date/time,
-semi-structured, DML, metadata, UDFs, ...). Each file runs in a fresh session:
+| Driver | Tested version | Result formats |
+|---|---|---|
+| Python: `snowflake-connector-python` | 5.x | Arrow, JSON |
+| Node.js: `snowflake-sdk` | 2.x | JSON (the driver's only format) |
+| Go: `gosnowflake` | v2 | Arrow, JSON |
 
-```text
-query rowsort types
-select region, sum(amount) from sales group by 1
-----
-VARCHAR|NUMBER(*,2)
-east|30.50
-```
-
-Cases marked `gap` are known differences: they're reported but don't fail the
-run, and a gap that starts passing is flagged so the marker can be removed.
-There are currently none. `CORPUS_SLOW=<ms>` lists slow cases.
-
-```sh
-cargo test -p localflake-engine --test corpus -- --nocapture   # summary
-CORPUS_FILTER=07 CORPUS_SHOW_GAPS=1 cargo test -p localflake-engine --test corpus -- --nocapture
-```
-
-The expected results come from Snowflake's documented behaviour. Cases that
-real Snowflake disagrees with are bugs in the corpus, so please fix them.
+These run in CI against every change. Other drivers that speak the same
+protocol (JDBC, ODBC, .NET) may work but aren't tested yet. See
+[`tests/README.md`](tests/README.md) for what the suites cover and the known
+differences between drivers.
 
 ## What works
 
@@ -212,15 +233,6 @@ real Snowflake disagrees with are bugs in the corpus, so please fix them.
   no-ops
 - DuckDB errors mapped to Snowflake error codes and SQLSTATEs
 
-## Roadmap
-
-1. **Record the corpus against real Snowflake:** the expected results are
-   written from Snowflake's documentation; running them against a Snowflake
-   account would catch the cases where the documentation and behaviour differ.
-2. **Chunked results:** large results are returned inline; Snowflake splits them
-   into chunks the driver downloads separately.
-3. **More drivers in CI:** JDBC, ODBC, .NET.
-
 ## Stages and file transfer
 
 Staged files live under `<data_dir>/stages` (or a temp directory for in-memory
@@ -290,21 +302,56 @@ types known.
   Scripting, time travel, streams and tasks.
 - No authentication, roles or access control.
 
-## Releases
+## Configuration
 
-Releases are managed with [changesets](https://github.com/changesets/changesets).
-`package.json` holds the version; `npm run version` copies it into the Cargo
-workspace.
+Every flag has an environment variable. Run `localflake --help` for the full
+list.
 
-1. Every pull request includes a changeset (`npm run changeset`, or
-   `npm run changeset -- --empty` for changes users won't notice). CI checks
-   for one.
-2. On `main`, the release workflow keeps a "Release <version>" pull request open
-   that applies the pending changesets: the version bump and `CHANGELOG.md`.
-3. Merging that pull request builds the image natively for amd64 and arm64,
-   pushes `ghcr.io/samlaycock/localflake:<version>`, `:<major>.<minor>` (and
-   `:<major>` from 1.0) and `:latest`, then tags `v<version>` and creates the
-   GitHub release from the changelog.
+| Flag | Environment variable | Default | |
+|---|---|---|---|
+| `--addr` | `LOCALFLAKE_ADDR` | `127.0.0.1:8080` | Address to listen on (`0.0.0.0:8080` in the Docker image) |
+| `--data-dir` | `LOCALFLAKE_DATA_DIR` | unset (in memory) | Directory for persistent databases, one DuckDB file each, and staged files |
+| `--result-format` | `LOCALFLAKE_RESULT_FORMAT` | `auto` | `auto` uses Arrow for drivers that request it from Snowflake, `json` or `arrow` forces one |
+| `--missing-database` | `LOCALFLAKE_MISSING_DATABASE` | `create` | Logging in with an unknown database creates it, or `ignore` logs in without a current database, as Snowflake does |
+
+Logging uses `RUST_LOG`. For example, `RUST_LOG=localflake_engine=debug` logs
+the DuckDB SQL each statement is translated to.
+
+### Time zones
+
+Time zones use DuckDB's ICU extension, which is embedded in the binary at build
+time, so localflake never needs the network at runtime. The build takes it from
+`LOCALFLAKE_ICU_EXTENSION` (a path, for offline builds), DuckDB's own cache in
+`~/.duckdb/extensions`, or a one-off download from extensions.duckdb.org. If
+none is available the build still succeeds and localflake installs ICU on first
+start instead. `LOCALFLAKE_NO_ICU=1` runs everything in UTC.
+
+## Roadmap
+
+1. **Record the corpus against real Snowflake:** the expected results are
+   written from Snowflake's documentation; running them against a Snowflake
+   account would catch the cases where the documentation and behaviour differ.
+2. **Chunked results:** large results are returned inline; Snowflake splits them
+   into chunks the driver downloads separately.
+3. **More drivers in CI:** JDBC, ODBC, .NET.
+
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+how to build, test and release, and how the SQL conformance corpus works.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/licenses/MIT)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
 
 ## Not affiliated with Snowflake
 

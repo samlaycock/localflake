@@ -2,7 +2,11 @@
 name = "localflake-sql"
 version.workspace = true
 edition.workspace = true
+description = "Snowflake SQL to DuckDB SQL translation, for localflake"
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 sqlparser.workspace = true

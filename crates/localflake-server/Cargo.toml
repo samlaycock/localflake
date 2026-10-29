@@ -2,7 +2,12 @@
 name = "localflake-server"
 version.workspace = true
 edition.workspace = true
+description = "A local Snowflake emulator on DuckDB that speaks the official drivers' protocol, for offline development and testing"
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [[bin]]
 name = "localflake"
