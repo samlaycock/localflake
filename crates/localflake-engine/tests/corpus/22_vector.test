@@ -81,3 +81,54 @@ select vector_l2_distance([1, 2]::vector(float, 2), [1, 2, 3]::vector(float, 3))
 
 error
 create table bad (v vector(varchar, 3))
+
+statement ok
+create table vector_data (id int, category varchar, embedding vector(float, 3))
+
+statement ok
+insert into vector_data select 1, 'A', [2.0, 4.0, 6.0]::vector(float, 3) union all select 2, 'A', [4.0, 8.0, 12.0]::vector(float, 3) union all select 3, 'B', [1.0, 2.0, 3.0]::vector(float, 3) union all select 4, 'B', [3.0, 6.0, 9.0]::vector(float, 3) union all select 5, 'B', null
+
+query types
+select category, vector_avg(embedding), vector_sum(embedding) from vector_data group by category order by category
+----
+VARCHAR|VECTOR(FLOAT, 3)|VECTOR(FLOAT, 3)
+A|[3,6,9]|[6,12,18]
+B|[2,4,6]|[4,8,12]
+
+query
+select vector_min(embedding), vector_max(embedding), vector_avg(embedding) from vector_data
+----
+[1,2,3]|[4,8,12]|[2.5,5,7.5]
+
+statement ok
+create table int_vector_data (id int, vec vector(int, 2))
+
+statement ok
+insert into int_vector_data select 1, [1, 3]::vector(int, 2) union all select 2, [2, 4]::vector(int, 2)
+
+query types
+select vector_avg(vec), vector_sum(vec), vector_max(vec) from int_vector_data
+----
+VECTOR(FLOAT, 2)|VECTOR(INT, 2)|VECTOR(INT, 2)
+[1.5,3.5]|[3,7]|[2,4]
+
+query types
+select vector_sum(vec) from int_vector_data where id > 2
+----
+VECTOR(INT, 2)
+NULL
+
+query types
+select vector_normalize([3, 4]::vector(int, 2)), vector_truncate([1, 2, 3]::vector(int, 3), 2)
+----
+VECTOR(FLOAT, 2)|VECTOR(INT, 2)
+[0.6,0.8]|[1,2]
+
+query types
+select vector_normalize(embedding) from vector_data where id = 5
+----
+VECTOR(FLOAT, 3)
+NULL
+
+error
+select vector_truncate([1, 2, 3]::vector(int, 3), 4)

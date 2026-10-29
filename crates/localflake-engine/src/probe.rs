@@ -138,6 +138,14 @@ unsafe fn type_name(logical: ffi::duckdb_logical_type) -> String {
             let (width, scale) = unsafe { (ffi::duckdb_decimal_width(logical), ffi::duckdb_decimal_scale(logical)) };
             return format!("DECIMAL({width},{scale})");
         }
+        // Fixed-size arrays (VECTOR storage), as `FLOAT[3]`.
+        ffi::DUCKDB_TYPE_DUCKDB_TYPE_ARRAY => {
+            let size = unsafe { ffi::duckdb_array_type_array_size(logical) };
+            let mut child = unsafe { ffi::duckdb_array_type_child_type(logical) };
+            let element = unsafe { type_name(child) };
+            unsafe { ffi::duckdb_destroy_logical_type(&mut child) };
+            return format!("{element}[{size}]");
+        }
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_BOOLEAN => "BOOLEAN",
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_TINYINT => "TINYINT",
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_SMALLINT => "SMALLINT",
