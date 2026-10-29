@@ -68,6 +68,22 @@ CREATE OR REPLACE TEMP MACRO sf_try_to_boolean(x) AS
             END
         ELSE TRY_CAST(x AS BOOLEAN) END;
 CREATE OR REPLACE TEMP MACRO sf_vector(v) AS CAST(v AS DOUBLE[]);
+CREATE OR REPLACE TEMP MACRO sf_vector_truncate(v, n) AS
+    CASE WHEN n > len(sf_vector(v)) THEN error('VECTOR_TRUNCATE: dimension ' || n || ' is larger than the vector''s ' || len(sf_vector(v)))
+        ELSE list_slice(sf_vector(v), 1, n) END;
+CREATE OR REPLACE TEMP MACRO sf_vectors(l) AS list_transform(list_filter(l, lambda v: v IS NOT NULL), lambda v: sf_vector(v));
+CREATE OR REPLACE TEMP MACRO sf_vector_sum(l) AS
+    CASE WHEN len(sf_vectors(l)) > 0
+        THEN list_reduce(sf_vectors(l), lambda a, b: list_transform(a, lambda x, i: x + b[i])) END;
+CREATE OR REPLACE TEMP MACRO sf_vector_min(l) AS
+    CASE WHEN len(sf_vectors(l)) > 0
+        THEN list_reduce(sf_vectors(l), lambda a, b: list_transform(a, lambda x, i: least(x, b[i]))) END;
+CREATE OR REPLACE TEMP MACRO sf_vector_max(l) AS
+    CASE WHEN len(sf_vectors(l)) > 0
+        THEN list_reduce(sf_vectors(l), lambda a, b: list_transform(a, lambda x, i: greatest(x, b[i]))) END;
+CREATE OR REPLACE TEMP MACRO sf_vector_avg(l) AS list_transform(sf_vector_sum(l), lambda x: x / len(sf_vectors(l)));
+CREATE OR REPLACE TEMP MACRO sf_vector_normalize(v) AS
+    list_transform(sf_vector(v), lambda x: x / sqrt(list_sum(list_transform(sf_vector(v), lambda y: y * y))));
 CREATE OR REPLACE TEMP MACRO sf_vector_cosine_similarity(a, b) AS
     CASE WHEN a IS NOT NULL AND b IS NOT NULL THEN list_cosine_similarity(sf_vector(a), sf_vector(b)) END;
 CREATE OR REPLACE TEMP MACRO sf_vector_inner_product(a, b) AS
@@ -799,6 +815,36 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         "VECTOR_COSINE_SIMILARITY" | "VECTOR_INNER_PRODUCT" | "VECTOR_L1_DISTANCE" | "VECTOR_L2_DISTANCE" => {
             func(&format!("sf_{}", name.to_lowercase()), vec![arg(0)?, arg(1)?])
         }
+        // Element-wise aggregates. The result is cast back to a vector once
+        // probing has found the input's type (see `typing::vector_operand`).
+        "VECTOR_SUM" | "VECTOR_MIN" | "VECTOR_MAX" | "VECTOR_AVG" => {
+            let (operand, vector_type) = crate::typing::vector_operand(&ctx.types, arg(0)?);
+            let result = func(&format!("sf_{}", name.to_lowercase()), vec![func("list", vec![operand])]);
+            // VECTOR_AVG is always a FLOAT vector; the others keep the input's element type.
+            let target = vector_type.map(|t| if name == "VECTOR_AVG" { float_vector(&t) } else { t });
+            match target {
+                Some(t) => cast(result, custom_type(&t)),
+                None => result,
+            }
+        }
+        "VECTOR_NORMALIZE" => {
+            let (operand, vector_type) = crate::typing::vector_operand(&ctx.types, arg(0)?);
+            let result = func("sf_vector_normalize", vec![operand]);
+            match vector_type {
+                Some(t) => cast(result, custom_type(&float_vector(&t))),
+                None => result,
+            }
+        }
+        "VECTOR_TRUNCATE" | "VECTOR_TRUNC" => {
+            let (operand, vector_type) = crate::typing::vector_operand(&ctx.types, arg(0)?);
+            let dimension = arg(1)?;
+            let result = func("sf_vector_truncate", vec![operand, dimension.clone()]);
+            let element = vector_type.as_deref().and_then(|t| t.split('[').next()).map(str::to_owned);
+            match (element, integer_literal(&dimension)) {
+                (Some(element), Some(n)) => cast(result, custom_type(&format!("{element}[{n}]"))),
+                _ => result,
+            }
+        }
         "ARRAY_CONTAINS" => {
             let haystack = cast(cast(arg(1)?, custom_type("VARIANT")), custom_type("JSON"));
             let needle = cast(cast(arg(0)?, custom_type("VARIANT")), custom_type("JSON"));
@@ -1166,6 +1212,11 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         _ => return Ok(None),
     };
     Ok(Some(expr))
+}
+
+/// The FLOAT vector type with the dimension of `vector_type` (`INTEGER[3]` → `FLOAT[3]`).
+fn float_vector(vector_type: &str) -> String {
+    format!("FLOAT[{}", vector_type.split_once('[').map_or("]", |(_, rest)| rest))
 }
 
 /// `DATEADD(part, n, value)`. DATE inputs stay DATEs for date-level parts.
