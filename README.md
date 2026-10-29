@@ -275,7 +275,7 @@ workspace.
 1. Every pull request includes a changeset (`npm run changeset`, or
    `npm run changeset -- --empty` for changes users won't notice). CI checks
    for one.
-2. On `main`, the release workflow keeps a "chore: release" pull request open
+2. On `main`, the release workflow keeps a "Release <version>" pull request open
    that applies the pending changesets: the version bump and `CHANGELOG.md`.
 3. Merging that pull request builds the image natively for amd64 and arm64,
    pushes `ghcr.io/samlaycock/localflake:<version>`, `:<major>.<minor>` (and
