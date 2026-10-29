@@ -1755,7 +1755,10 @@ impl Session {
                 (bytes, rows as usize)
             }
             other => {
-                return Err(EngineError::load("002040", format!("localflake cannot unload to the {other} file format")));
+                return Err(EngineError::load(
+                    "002040",
+                    format!("localflake cannot unload to the {other} file format"),
+                ));
             }
         };
         let input_bytes = content.len() as i64;
