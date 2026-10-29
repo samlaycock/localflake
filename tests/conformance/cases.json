@@ -1,0 +1,1680 @@
+{
+  "cases": [
+    {
+      "name": "connection/context",
+      "connect": {
+        "database": "CONF_CTX",
+        "schema": "PUBLIC",
+        "role": "SYSADMIN",
+        "warehouse": "CONF_WH"
+      },
+      "steps": [
+        {
+          "sql": "select current_database(), current_schema(), current_role(), current_warehouse()",
+          "columns": [
+            [
+              "CURRENT_DATABASE()",
+              "TEXT"
+            ],
+            [
+              "CURRENT_SCHEMA()",
+              "TEXT"
+            ],
+            [
+              "CURRENT_ROLE()",
+              "TEXT"
+            ],
+            [
+              "CURRENT_WAREHOUSE()",
+              "TEXT"
+            ]
+          ],
+          "rows": [
+            [
+              "CONF_CTX",
+              "PUBLIC",
+              "SYSADMIN",
+              "CONF_WH"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "connection/session-parameters",
+      "connect": {
+        "session_parameters": {
+          "QUERY_TAG": "conformance",
+          "TIMEZONE": "Asia/Tokyo"
+        }
+      },
+      "steps": [
+        {
+          "sql": "show parameters like 'QUERY_TAG' in session"
+        },
+        {
+          "sql": "select \"value\" from table(result_scan(last_query_id()))",
+          "rows": [
+            [
+              "conformance"
+            ]
+          ]
+        },
+        {
+          "sql": "select hour('2024-01-01 00:00:00 +00:00'::timestamp_ltz)",
+          "rows": [
+            [
+              "9"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "connection/use-and-create-schema",
+      "steps": [
+        {
+          "sql": "create or replace schema conf_other"
+        },
+        {
+          "sql": "select current_schema()",
+          "rows": [
+            [
+              "CONF_OTHER"
+            ]
+          ]
+        },
+        {
+          "sql": "use schema public"
+        },
+        {
+          "sql": "select current_schema()",
+          "rows": [
+            [
+              "PUBLIC"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/fixed",
+      "steps": [
+        {
+          "sql": "select 0, -7, 123456789012345678, 99999999999999999999999999999999999999, 1.50::number(10,2), -0.001::number(38,3), null::number",
+          "columns": [
+            [
+              "0",
+              "FIXED(*,0)"
+            ],
+            [
+              "-7",
+              "FIXED(*,0)"
+            ],
+            [
+              "123456789012345678",
+              "FIXED(*,0)"
+            ],
+            [
+              "99999999999999999999999999999999999999",
+              "FIXED(*,0)"
+            ],
+            [
+              "1.50::NUMBER(10,2)",
+              "FIXED(10,2)"
+            ],
+            [
+              "-0.001::NUMBER(38,3)",
+              "FIXED(38,3)"
+            ],
+            [
+              "NULL::NUMBER",
+              "FIXED(38,0)"
+            ]
+          ],
+          "rows": [
+            [
+              "0",
+              "-7",
+              "123456789012345678",
+              "99999999999999999999999999999999999999",
+              "1.50",
+              "-0.001",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/real",
+      "steps": [
+        {
+          "sql": "select 1.5::float, -2.25::double, 1e300, 'NaN'::float, null::float",
+          "columns": [
+            [
+              "1.5::FLOAT",
+              "REAL"
+            ],
+            [
+              "-2.25::DOUBLE",
+              "REAL"
+            ],
+            [
+              "1E300",
+              "REAL"
+            ],
+            [
+              "'NAN'::FLOAT",
+              "REAL"
+            ],
+            [
+              "NULL::FLOAT",
+              "REAL"
+            ]
+          ],
+          "rows": [
+            [
+              1.5,
+              -2.25,
+              1e+300,
+              "NaN",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/real-infinity",
+      "skip": {
+        "node": "snowflake-sdk converts FLOAT text with Number(), which reads Snowflake's 'inf' as NaN"
+      },
+      "steps": [
+        {
+          "sql": "select 'inf'::float as p, '-inf'::float as n",
+          "columns": [
+            [
+              "P",
+              "REAL"
+            ],
+            [
+              "N",
+              "REAL"
+            ]
+          ],
+          "rows": [
+            [
+              "Infinity",
+              "-Infinity"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/text",
+      "steps": [
+        {
+          "sql": "select 'hello' as a, '' as b, 'é ✓ 😀' as c, 'line1\\nline2' as d, null::varchar as e",
+          "columns": [
+            [
+              "A",
+              "TEXT"
+            ],
+            [
+              "B",
+              "TEXT"
+            ],
+            [
+              "C",
+              "TEXT"
+            ],
+            [
+              "D",
+              "TEXT"
+            ],
+            [
+              "E",
+              "TEXT"
+            ]
+          ],
+          "rows": [
+            [
+              "hello",
+              "",
+              "é ✓ 😀",
+              "line1\nline2",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/boolean",
+      "steps": [
+        {
+          "sql": "select true as t, false as f, null::boolean as n",
+          "columns": [
+            [
+              "T",
+              "BOOLEAN"
+            ],
+            [
+              "F",
+              "BOOLEAN"
+            ],
+            [
+              "N",
+              "BOOLEAN"
+            ]
+          ],
+          "rows": [
+            [
+              true,
+              false,
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/date",
+      "steps": [
+        {
+          "sql": "select '2024-02-29'::date as a, '1969-12-31'::date as b, '1900-01-01'::date as c, '9999-12-31'::date as d, null::date as e",
+          "columns": [
+            [
+              "A",
+              "DATE"
+            ],
+            [
+              "B",
+              "DATE"
+            ],
+            [
+              "C",
+              "DATE"
+            ],
+            [
+              "D",
+              "DATE"
+            ],
+            [
+              "E",
+              "DATE"
+            ]
+          ],
+          "rows": [
+            [
+              "2024-02-29",
+              "1969-12-31",
+              "1900-01-01",
+              "9999-12-31",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/time",
+      "steps": [
+        {
+          "sql": "select '00:00:00'::time as a, '10:11:12.5'::time as b, '23:59:59.123456'::time as c, null::time as d",
+          "columns": [
+            [
+              "A",
+              "TIME"
+            ],
+            [
+              "B",
+              "TIME"
+            ],
+            [
+              "C",
+              "TIME"
+            ],
+            [
+              "D",
+              "TIME"
+            ]
+          ],
+          "rows": [
+            [
+              "00:00:00",
+              "10:11:12.5",
+              "23:59:59.123456",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/timestamp-ntz",
+      "steps": [
+        {
+          "sql": "select '2024-01-02 03:04:05'::timestamp_ntz as a, '2024-01-02 03:04:05.123456'::timestamp_ntz as b, '1969-07-20 20:17:40'::timestamp_ntz as c, null::timestamp_ntz as d",
+          "columns": [
+            [
+              "A",
+              "TIMESTAMP_NTZ"
+            ],
+            [
+              "B",
+              "TIMESTAMP_NTZ"
+            ],
+            [
+              "C",
+              "TIMESTAMP_NTZ"
+            ],
+            [
+              "D",
+              "TIMESTAMP_NTZ"
+            ]
+          ],
+          "rows": [
+            [
+              "2024-01-02 03:04:05",
+              "2024-01-02 03:04:05.123456",
+              "1969-07-20 20:17:40",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/timestamp-before-1970-with-fraction",
+      "skip": {
+        "go/JSON": "gosnowflake's JSON parser splits '-0.5' seconds into 0 and +0.5; its Arrow path is right"
+      },
+      "steps": [
+        {
+          "sql": "select '1969-12-31 23:59:59.5'::timestamp_ntz as a",
+          "columns": [
+            [
+              "A",
+              "TIMESTAMP_NTZ"
+            ]
+          ],
+          "rows": [
+            [
+              "1969-12-31 23:59:59.5"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/timestamp-ltz",
+      "connect": {
+        "session_parameters": {
+          "TIMEZONE": "America/Los_Angeles"
+        }
+      },
+      "steps": [
+        {
+          "sql": "select '2024-07-01 12:00:00 +00:00'::timestamp_ltz as a, '2024-01-01 00:00:00.25'::timestamp_ltz as b, null::timestamp_ltz as c",
+          "columns": [
+            [
+              "A",
+              "TIMESTAMP_LTZ"
+            ],
+            [
+              "B",
+              "TIMESTAMP_LTZ"
+            ],
+            [
+              "C",
+              "TIMESTAMP_LTZ"
+            ]
+          ],
+          "rows": [
+            [
+              "2024-07-01 12:00:00Z",
+              "2024-01-01 08:00:00.25Z",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/timestamp-tz",
+      "steps": [
+        {
+          "sql": "select '2024-03-15 10:11:12 +02:00'::timestamp_tz as a, '2024-03-15 10:11:12.5 -05:30'::timestamp_tz as b, '2024-01-01 00:00:00 +00:00'::timestamp_tz as c, null::timestamp_tz as d",
+          "columns": [
+            [
+              "A",
+              "TIMESTAMP_TZ"
+            ],
+            [
+              "B",
+              "TIMESTAMP_TZ"
+            ],
+            [
+              "C",
+              "TIMESTAMP_TZ"
+            ],
+            [
+              "D",
+              "TIMESTAMP_TZ"
+            ]
+          ],
+          "rows": [
+            [
+              "2024-03-15 10:11:12+02:00",
+              "2024-03-15 10:11:12.5-05:30",
+              "2024-01-01 00:00:00+00:00",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/binary",
+      "steps": [
+        {
+          "sql": "select to_binary('ab', 'utf-8') as a, to_binary('', 'hex') as b, to_binary('00ff', 'hex') as c, null::binary as d",
+          "columns": [
+            [
+              "A",
+              "BINARY"
+            ],
+            [
+              "B",
+              "BINARY"
+            ],
+            [
+              "C",
+              "BINARY"
+            ],
+            [
+              "D",
+              "BINARY"
+            ]
+          ],
+          "rows": [
+            [
+              "6162",
+              "",
+              "00ff",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/semi-structured",
+      "steps": [
+        {
+          "sql": "select parse_json('{\"b\": [1, 2, {\"c\": \"x\"}], \"a\": 1.5}') as v, object_construct('k', 'v', 'n', 1) as o, array_construct(1, 'two', parse_json('null')) as arr, null::variant as n",
+          "columns": [
+            [
+              "V",
+              "VARIANT"
+            ],
+            [
+              "O",
+              "OBJECT"
+            ],
+            [
+              "ARR",
+              "ARRAY"
+            ],
+            [
+              "N",
+              "VARIANT"
+            ]
+          ],
+          "rows": [
+            [
+              "{\"a\":1.5,\"b\":[1,2,{\"c\":\"x\"}]}",
+              "{\"k\":\"v\",\"n\":1}",
+              "[1,\"two\",null]",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/variant-json-null",
+      "skip": {
+        "node": "snowflake-sdk parses VARIANT values, so JSON null and SQL NULL both become null"
+      },
+      "steps": [
+        {
+          "sql": "select parse_json('null') as j, null::variant as s",
+          "columns": [
+            [
+              "J",
+              "VARIANT"
+            ],
+            [
+              "S",
+              "VARIANT"
+            ]
+          ],
+          "rows": [
+            [
+              "null",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/table-columns",
+      "steps": [
+        {
+          "sql": "create or replace table conf_types (n number(10,2) not null, i int, f float, s varchar(20), b boolean, d date, t time, ntz timestamp_ntz, ltz timestamp_ltz, tz timestamp_tz, bin binary, v variant, o object, a array)"
+        },
+        {
+          "sql": "insert into conf_types select 12.5, 42, 0.25, 'x', true, '2024-01-02', '03:04:05', '2024-01-02 03:04:05', '2024-01-02 03:04:05 +00:00', '2024-01-02 03:04:05 +01:00', to_binary('ff', 'hex'), parse_json('[true]'), object_construct('a', 1), array_construct('z')",
+          "rowcount": 1
+        },
+        {
+          "sql": "insert into conf_types (n) values (0)",
+          "rowcount": 1
+        },
+        {
+          "sql": "select * from conf_types order by n desc",
+          "columns": [
+            [
+              "N",
+              "FIXED(10,2)"
+            ],
+            [
+              "I",
+              "FIXED(38,0)"
+            ],
+            [
+              "F",
+              "REAL"
+            ],
+            [
+              "S",
+              "TEXT"
+            ],
+            [
+              "B",
+              "BOOLEAN"
+            ],
+            [
+              "D",
+              "DATE"
+            ],
+            [
+              "T",
+              "TIME"
+            ],
+            [
+              "NTZ",
+              "TIMESTAMP_NTZ"
+            ],
+            [
+              "LTZ",
+              "TIMESTAMP_LTZ"
+            ],
+            [
+              "TZ",
+              "TIMESTAMP_TZ"
+            ],
+            [
+              "BIN",
+              "BINARY"
+            ],
+            [
+              "V",
+              "VARIANT"
+            ],
+            [
+              "O",
+              "OBJECT"
+            ],
+            [
+              "A",
+              "ARRAY"
+            ]
+          ],
+          "rows": [
+            [
+              "12.50",
+              "42",
+              0.25,
+              "x",
+              true,
+              "2024-01-02",
+              "03:04:05",
+              "2024-01-02 03:04:05",
+              "2024-01-02 03:04:05Z",
+              "2024-01-02 03:04:05+01:00",
+              "ff",
+              "[true]",
+              "{\"a\":1}",
+              "[\"z\"]"
+            ],
+            [
+              "0.00",
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "types/column-names",
+      "steps": [
+        {
+          "sql": "select 1 as \"Mixed Case\", 2 as plain, 3 as \"lower\", 1 + 1",
+          "columns": [
+            [
+              "Mixed Case",
+              "FIXED(*,0)"
+            ],
+            [
+              "PLAIN",
+              "FIXED(*,0)"
+            ],
+            [
+              "lower",
+              "FIXED(*,0)"
+            ],
+            [
+              "1 + 1",
+              "FIXED(*,0)"
+            ]
+          ],
+          "rows": [
+            [
+              "1",
+              "2",
+              "3",
+              "2"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binds/scalar-types",
+      "steps": [
+        {
+          "sql": "select ?::number as i, ?::number(10,2) as d, ?::float as f, ?::varchar as s, ?::boolean as b, ?::varchar as n",
+          "binds": [
+            {
+              "type": "FIXED",
+              "value": "42"
+            },
+            {
+              "type": "FIXED",
+              "value": "12.34"
+            },
+            {
+              "type": "REAL",
+              "value": 1.5
+            },
+            {
+              "type": "TEXT",
+              "value": "héllo"
+            },
+            {
+              "type": "BOOLEAN",
+              "value": true
+            },
+            {
+              "type": "NULL"
+            }
+          ],
+          "rows": [
+            [
+              "42",
+              "12.34",
+              1.5,
+              "héllo",
+              true,
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binds/dates-and-times",
+      "steps": [
+        {
+          "sql": "select ?::date as d, ?::timestamp_ntz as ntz, ?::time as t",
+          "binds": [
+            {
+              "type": "DATE",
+              "value": "2024-02-29"
+            },
+            {
+              "type": "TIMESTAMP_NTZ",
+              "value": "2024-01-02 03:04:05.5"
+            },
+            {
+              "type": "TIME",
+              "value": "10:11:12"
+            }
+          ],
+          "rows": [
+            [
+              "2024-02-29",
+              "2024-01-02 03:04:05.5",
+              "10:11:12"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binds/timestamp-ltz",
+      "connect": {
+        "session_parameters": {
+          "TIMEZONE": "America/Los_Angeles"
+        }
+      },
+      "steps": [
+        {
+          "sql": "select ?::timestamp_ltz as ltz, hour(?::timestamp_ltz) as local_hour",
+          "binds": [
+            {
+              "type": "TIMESTAMP_LTZ",
+              "value": "2024-07-01 12:00:00.5Z"
+            },
+            {
+              "type": "TIMESTAMP_LTZ",
+              "value": "2024-07-01 12:00:00Z"
+            }
+          ],
+          "columns": [
+            [
+              "LTZ",
+              "TIMESTAMP_LTZ"
+            ],
+            [
+              "LOCAL_HOUR",
+              "FIXED(*,0)"
+            ]
+          ],
+          "rows": [
+            [
+              "2024-07-01 12:00:00.5Z",
+              "5"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binds/timestamp-ltz-typed",
+      "skip": {
+        "node": "snowflake-sdk binds Date values as TEXT, so a bare ? is a string"
+      },
+      "steps": [
+        {
+          "sql": "select ? as ltz",
+          "binds": [
+            {
+              "type": "TIMESTAMP_LTZ",
+              "value": "2024-07-01 12:00:00.5Z"
+            }
+          ],
+          "columns": [
+            [
+              "LTZ",
+              "TIMESTAMP_LTZ"
+            ]
+          ],
+          "rows": [
+            [
+              "2024-07-01 12:00:00.5Z"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binds/timestamp-tz",
+      "skip": {
+        "node": "JavaScript Date values have no offset, so snowflake-sdk can't bind TIMESTAMP_TZ",
+        "python": "the Python connector's Rust core sends TIMESTAMP_TZ binds as epoch nanoseconds without their offset"
+      },
+      "steps": [
+        {
+          "sql": "select ? as tz",
+          "binds": [
+            {
+              "type": "TIMESTAMP_TZ",
+              "value": "2024-03-15 10:11:12+02:00"
+            }
+          ],
+          "columns": [
+            [
+              "TZ",
+              "TIMESTAMP_TZ"
+            ]
+          ],
+          "rows": [
+            [
+              "2024-03-15 10:11:12+02:00"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binds/numeric-placeholders",
+      "steps": [
+        {
+          "sql": "select :2 || :1 as s, :1 as again",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "a"
+            },
+            {
+              "type": "TEXT",
+              "value": "b"
+            }
+          ],
+          "rows": [
+            [
+              "ba",
+              "a"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binds/insert-and-filter",
+      "steps": [
+        {
+          "sql": "create or replace table conf_binds (id int, name varchar)"
+        },
+        {
+          "sql": "insert into conf_binds values (?, ?), (?, ?)",
+          "binds": [
+            {
+              "type": "FIXED",
+              "value": "1"
+            },
+            {
+              "type": "TEXT",
+              "value": "a"
+            },
+            {
+              "type": "FIXED",
+              "value": "2"
+            },
+            {
+              "type": "NULL"
+            }
+          ],
+          "rowcount": 2
+        },
+        {
+          "sql": "select id, name from conf_binds where id >= ? order by id",
+          "binds": [
+            {
+              "type": "FIXED",
+              "value": "1"
+            }
+          ],
+          "rows": [
+            [
+              "1",
+              "a"
+            ],
+            [
+              "2",
+              null
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binds/array-binding",
+      "steps": [
+        {
+          "sql": "create or replace table conf_array (id int, name varchar, score float)"
+        },
+        {
+          "sql": "insert into conf_array values (?, ?, ?)",
+          "bind_rows": [
+            [
+              {
+                "type": "FIXED",
+                "value": "1"
+              },
+              {
+                "type": "TEXT",
+                "value": "a"
+              },
+              {
+                "type": "REAL",
+                "value": 0.5
+              }
+            ],
+            [
+              {
+                "type": "FIXED",
+                "value": "2"
+              },
+              {
+                "type": "TEXT",
+                "value": "b"
+              },
+              {
+                "type": "NULL"
+              }
+            ],
+            [
+              {
+                "type": "FIXED",
+                "value": "3"
+              },
+              {
+                "type": "NULL"
+              },
+              {
+                "type": "REAL",
+                "value": 2
+              }
+            ]
+          ],
+          "rowcount": 3
+        },
+        {
+          "sql": "select * from conf_array order by id",
+          "rows": [
+            [
+              "1",
+              "a",
+              0.5
+            ],
+            [
+              "2",
+              "b",
+              null
+            ],
+            [
+              "3",
+              null,
+              2
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dml/row-counts",
+      "steps": [
+        {
+          "sql": "create or replace table conf_dml (id int, v varchar)"
+        },
+        {
+          "sql": "insert into conf_dml values (1, 'a'), (2, 'b'), (3, 'c')",
+          "rowcount": 3
+        },
+        {
+          "sql": "insert into conf_dml select id + 10, v from conf_dml",
+          "rowcount": 3
+        },
+        {
+          "sql": "update conf_dml set v = 'z' where id > 10",
+          "rowcount": 3
+        },
+        {
+          "sql": "update conf_dml set v = 'none' where id < 0",
+          "rowcount": 0
+        },
+        {
+          "sql": "delete from conf_dml where id = 1",
+          "rowcount": 1
+        },
+        {
+          "sql": "select count(*) from conf_dml",
+          "rows": [
+            [
+              "5"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dml/merge",
+      "steps": [
+        {
+          "sql": "create or replace table conf_target (id int, v varchar)"
+        },
+        {
+          "sql": "insert into conf_target values (1, 'old'), (2, 'old')"
+        },
+        {
+          "sql": "merge into conf_target t using (select 2 as id, 'new' as v union all select 3, 'new') s on t.id = s.id when matched then update set v = s.v when not matched then insert values (s.id, s.v)",
+          "columns": [
+            [
+              "number of rows inserted",
+              "FIXED(*,0)"
+            ],
+            [
+              "number of rows updated",
+              "FIXED(*,0)"
+            ]
+          ],
+          "rows": [
+            [
+              "1",
+              "1"
+            ]
+          ]
+        },
+        {
+          "sql": "select id, v from conf_target order by id",
+          "rows": [
+            [
+              "1",
+              "old"
+            ],
+            [
+              "2",
+              "new"
+            ],
+            [
+              "3",
+              "new"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ddl/status-messages",
+      "steps": [
+        {
+          "sql": "create or replace table conf_ddl (id int)",
+          "columns": [
+            [
+              "status",
+              "TEXT"
+            ]
+          ],
+          "rows": [
+            [
+              "Table CONF_DDL successfully created."
+            ]
+          ]
+        },
+        {
+          "sql": "drop table conf_ddl",
+          "rows": [
+            [
+              "CONF_DDL successfully dropped."
+            ]
+          ]
+        },
+        {
+          "sql": "create or replace table conf_ctas as select 1 as x",
+          "rows": [
+            [
+              "Table CONF_CTAS successfully created."
+            ]
+          ]
+        },
+        {
+          "sql": "create table conf_ctas (x int)",
+          "error": {
+            "code": "002002",
+            "sqlstate": "42710"
+          }
+        }
+      ]
+    },
+    {
+      "name": "queries/empty-result",
+      "steps": [
+        {
+          "sql": "create or replace table conf_empty (id int, name varchar)"
+        },
+        {
+          "sql": "select id, name from conf_empty",
+          "columns": [
+            [
+              "ID",
+              "FIXED(38,0)"
+            ],
+            [
+              "NAME",
+              "TEXT"
+            ]
+          ],
+          "rows": []
+        }
+      ]
+    },
+    {
+      "name": "queries/large-result",
+      "steps": [
+        {
+          "sql": "select seq4() as n, uniform(1, 10, random()) as r, 'padding-' || seq4() as s from table(generator(rowcount => 100000))",
+          "row_count": 100000
+        },
+        {
+          "sql": "select count(*), sum(n) from (select seq4() as n from table(generator(rowcount => 100000)))",
+          "rows": [
+            [
+              "100000",
+              "4999950000"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "queries/result-scan",
+      "steps": [
+        {
+          "sql": "select 1 as a, 'x' as b union all select 2, 'y'"
+        },
+        {
+          "sql": "select b, a from table(result_scan(last_query_id())) order by a desc",
+          "rows": [
+            [
+              "y",
+              "2"
+            ],
+            [
+              "x",
+              "1"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "queries/semi-structured-access",
+      "steps": [
+        {
+          "sql": "select f.value:name::string as name, f.index from table(flatten(parse_json('[{\"name\": \"a\"}, {\"name\": \"b\"}]'))) f order by f.index",
+          "columns": [
+            [
+              "NAME",
+              "TEXT"
+            ],
+            [
+              "INDEX",
+              "FIXED(*,0)"
+            ]
+          ],
+          "rows": [
+            [
+              "a",
+              "0"
+            ],
+            [
+              "b",
+              "1"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "multi-statement/results",
+      "steps": [
+        {
+          "sql": "create or replace table conf_multi (x int); insert into conf_multi values (1), (2); select x from conf_multi order by x",
+          "statements": 3,
+          "results": [
+            {
+              "rows": [
+                [
+                  "Table CONF_MULTI successfully created."
+                ]
+              ]
+            },
+            {
+              "rowcount": 2
+            },
+            {
+              "columns": [
+                [
+                  "X",
+                  "FIXED(38,0)"
+                ]
+              ],
+              "rows": [
+                [
+                  "1"
+                ],
+                [
+                  "2"
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "multi-statement/count-mismatch",
+      "steps": [
+        {
+          "sql": "select 1; select 2",
+          "error": {
+            "code": "000008",
+            "sqlstate": "0A000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "async/query",
+      "steps": [
+        {
+          "sql": "select 42 as answer",
+          "async": true,
+          "columns": [
+            [
+              "ANSWER",
+              "FIXED(*,0)"
+            ]
+          ],
+          "rows": [
+            [
+              "42"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "async/error",
+      "steps": [
+        {
+          "sql": "select * from conf_missing_async",
+          "async": true,
+          "error": {
+            "code": "002003"
+          }
+        }
+      ]
+    },
+    {
+      "name": "describe/columns-only",
+      "steps": [
+        {
+          "sql": "create or replace table conf_describe (id number(10,0), name varchar)"
+        },
+        {
+          "sql": "select id, name, 1.5::number(4,1) as x from conf_describe",
+          "describe": true,
+          "columns": [
+            [
+              "ID",
+              "FIXED(*,0)"
+            ],
+            [
+              "NAME",
+              "TEXT"
+            ],
+            [
+              "X",
+              "FIXED(4,1)"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "errors/codes",
+      "steps": [
+        {
+          "sql": "select * from conf_no_such_table",
+          "error": {
+            "code": "002003",
+            "sqlstate": "42S02"
+          }
+        },
+        {
+          "sql": "select from where",
+          "error": {
+            "code": "001003",
+            "sqlstate": "42000"
+          }
+        },
+        {
+          "sql": "select 1 / 0",
+          "error": {
+            "code": "100051",
+            "sqlstate": "22012"
+          }
+        },
+        {
+          "sql": "select 'abc'::int",
+          "error": {
+            "code": "100038",
+            "sqlstate": "22018"
+          }
+        },
+        {
+          "sql": "select no_such_column from (select 1 as a)",
+          "error": {
+            "code": "000904",
+            "sqlstate": "42000"
+          }
+        },
+        {
+          "sql": "select no_such_function(1)",
+          "error": {
+            "code": "002140",
+            "sqlstate": "42601"
+          }
+        }
+      ]
+    },
+    {
+      "name": "errors/constraints",
+      "steps": [
+        {
+          "sql": "create or replace table conf_constraints (id int not null, code varchar(2))"
+        },
+        {
+          "sql": "insert into conf_constraints values (null, 'a')",
+          "error": {
+            "code": "100072",
+            "sqlstate": "22000"
+          }
+        },
+        {
+          "sql": "insert into conf_constraints values (1, 'abc')",
+          "error": {
+            "code": "100074",
+            "sqlstate": "22001"
+          }
+        },
+        {
+          "sql": "select count(*) from conf_constraints",
+          "rows": [
+            [
+              "0"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "errors/session-survives",
+      "steps": [
+        {
+          "sql": "select * from conf_still_missing",
+          "error": {
+            "code": "002003",
+            "sqlstate": "42S02"
+          }
+        },
+        {
+          "sql": "select 'still here'",
+          "rows": [
+            [
+              "still here"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "transactions/rollback",
+      "steps": [
+        {
+          "sql": "create or replace table conf_tx (id int)"
+        },
+        {
+          "sql": "begin"
+        },
+        {
+          "sql": "insert into conf_tx values (1)",
+          "rowcount": 1
+        },
+        {
+          "sql": "rollback"
+        },
+        {
+          "sql": "select count(*) from conf_tx",
+          "rows": [
+            [
+              "0"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "transactions/commit-after-error",
+      "steps": [
+        {
+          "sql": "create or replace table conf_tx2 (id int)"
+        },
+        {
+          "sql": "begin"
+        },
+        {
+          "sql": "insert into conf_tx2 values (1)"
+        },
+        {
+          "sql": "select * from conf_tx2_missing",
+          "error": {
+            "code": "002003",
+            "sqlstate": "42S02"
+          }
+        },
+        {
+          "sql": "insert into conf_tx2 values (2)"
+        },
+        {
+          "sql": "commit"
+        },
+        {
+          "sql": "select id from conf_tx2 order by id",
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "transactions/autocommit-off",
+      "steps": [
+        {
+          "sql": "create or replace table conf_tx3 (id int)"
+        },
+        {
+          "sql": "alter session set autocommit = false"
+        },
+        {
+          "sql": "insert into conf_tx3 values (1)"
+        },
+        {
+          "sql": "rollback"
+        },
+        {
+          "sql": "insert into conf_tx3 values (2)"
+        },
+        {
+          "sql": "commit"
+        },
+        {
+          "sql": "select id from conf_tx3",
+          "rows": [
+            [
+              "2"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "session/alter-session",
+      "steps": [
+        {
+          "sql": "alter session set timezone = 'UTC'"
+        },
+        {
+          "sql": "select hour('2024-01-01 05:00:00 +00:00'::timestamp_ltz)",
+          "rows": [
+            [
+              "5"
+            ]
+          ]
+        },
+        {
+          "sql": "alter session set timezone = 'America/New_York'"
+        },
+        {
+          "sql": "select hour('2024-07-01 12:00:00 +00:00'::timestamp_ltz)",
+          "rows": [
+            [
+              "8"
+            ]
+          ]
+        },
+        {
+          "sql": "set conf_var = 'from variable'"
+        },
+        {
+          "sql": "select $conf_var",
+          "rows": [
+            [
+              "from variable"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stages/put-copy-get",
+      "files": {
+        "people.csv": "1,Ada\n2,Grace\n"
+      },
+      "steps": [
+        {
+          "sql": "create or replace stage conf_stage"
+        },
+        {
+          "sql": "put file://{tmpdir}/people.csv @conf_stage/in/"
+        },
+        {
+          "sql": "list @conf_stage"
+        },
+        {
+          "sql": "select \"name\" from table(result_scan(last_query_id()))",
+          "rows": [
+            [
+              "conf_stage/in/people.csv.gz"
+            ]
+          ]
+        },
+        {
+          "sql": "create or replace table conf_people (id int, name varchar)"
+        },
+        {
+          "sql": "copy into conf_people from @conf_stage/in/",
+          "rows": [
+            [
+              "conf_stage/in/people.csv.gz",
+              "LOADED",
+              "2",
+              "2",
+              "1",
+              "0",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        {
+          "sql": "select name from conf_people order by id",
+          "rows": [
+            [
+              "Ada"
+            ],
+            [
+              "Grace"
+            ]
+          ]
+        },
+        {
+          "sql": "copy into @conf_stage/out/ from conf_people file_format = (type = csv compression = none) single = true"
+        },
+        {
+          "sql": "get @conf_stage/out/ file://{tmpdir}/out/",
+          "files_after": {
+            "out/data": "1,Ada\n2,Grace\n"
+          }
+        }
+      ]
+    },
+    {
+      "name": "stages/query-staged-files",
+      "files": {
+        "items.json": "{\"id\": 1, \"tags\": [\"a\"]}\n{\"id\": 2, \"tags\": []}\n"
+      },
+      "steps": [
+        {
+          "sql": "create or replace stage conf_json_stage file_format = (type = json)"
+        },
+        {
+          "sql": "put file://{tmpdir}/items.json @conf_json_stage auto_compress = false"
+        },
+        {
+          "sql": "select $1:id::int as id, array_size($1:tags) as tags, metadata$filename as file from @conf_json_stage order by id",
+          "rows": [
+            [
+              "1",
+              "1",
+              "items.json"
+            ],
+            [
+              "2",
+              "0",
+              "items.json"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

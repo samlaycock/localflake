@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net"
@@ -220,5 +221,63 @@ func TestStages(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(out, "data"))
 	if err != nil || string(got) != "1,Ada\n2,Grace\n" {
 		t.Fatalf("downloaded %q err %v", got, err)
+	}
+}
+
+func TestTransactionAPI(t *testing.T) {
+	db := open(t, "GO_TX")
+	ctx := context.Background()
+	if _, err := db.Exec("create or replace table t (id int)"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("insert into t values (1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("insert into t values (2)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var ids []int
+	rows, err := db.Query("select id from t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) != 1 || ids[0] != 2 {
+		t.Fatalf("ids %v", ids)
+	}
+}
+
+func TestQueryID(t *testing.T) {
+	db := open(t, "GO_QID")
+	ids := make(chan string, 1)
+	ctx := sf.WithQueryIDChan(context.Background(), ids)
+	var answer int
+	if err := db.QueryRowContext(ctx, "select 42").Scan(&answer); err != nil {
+		t.Fatal(err)
+	}
+	id := <-ids
+	var again int
+	if err := db.QueryRow(fmt.Sprintf("select * from table(result_scan('%s'))", id)).Scan(&again); err != nil || again != 42 {
+		t.Fatalf("result_scan(%s): %d %v", id, again, err)
 	}
 }

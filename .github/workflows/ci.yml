@@ -41,7 +41,7 @@ jobs:
           cache-dependency-path: tests/node/package-lock.json
       - name: Node.js driver
         working-directory: tests/node
-        run: npm ci && node --test driver.test.js
+        run: npm ci && npm test
       - uses: actions/setup-go@v5
         with:
           go-version-file: tests/go/go.mod
