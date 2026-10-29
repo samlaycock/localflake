@@ -135,6 +135,11 @@ CREATE OR REPLACE TEMP MACRO sf_search_value(x, q, analyzer, mode) AS
         THEN sf_search(sf_search_text(x), typeof(x) <> 'VARCHAR', q, analyzer, mode) ELSE false END;
 CREATE OR REPLACE TEMP MACRO sf_search_ip_value(x, q) AS
     CASE WHEN sf_searchable(x) THEN sf_search_ip(sf_search_text(x), typeof(x) <> 'VARCHAR', q) ELSE false END;
+CREATE OR REPLACE TEMP MACRO sf_binary_substr(b, s, n) AS
+    unhex(substr(hex(b), (CASE WHEN s < 0 THEN octet_length(b) + s + 1 ELSE s END - 1) * 2 + 1, greatest(n, 0) * 2));
+CREATE OR REPLACE TEMP MACRO sf_blob(x) AS
+    CASE WHEN typeof(x) = 'BLOB' THEN CAST(x AS BLOB) ELSE encode(CAST(x AS VARCHAR)) END;
+CREATE OR REPLACE TEMP MACRO sf_blob_or_empty(x) AS coalesce(sf_blob(x), ''::BLOB);
 CREATE OR REPLACE TEMP MACRO sf_tokens(s, d) AS
     list_filter(string_split_regex(s, '[' || regexp_escape(d) || ']'), lambda t: t <> '');
 CREATE OR REPLACE TEMP MACRO sf_array_to_string(a, sep) AS
@@ -762,6 +767,22 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             };
             try_if(&name, converted)
         }
+        // A start of 0 counts as 1; BINARY values are cut by bytes.
+        "SUBSTR" | "SUBSTRING" => {
+            let start = arg(1)?;
+            let start = match integer_literal(&start) {
+                Some(0) => number(1),
+                Some(_) => start,
+                None => case(vec![(binop(start.clone(), BinaryOperator::Eq, number(0)), number(1))], Some(start)),
+            };
+            let (value, value_type) = crate::typing::probed_operand(&ctx.types, arg(0)?);
+            let length = opt_arg(2)?;
+            if value_type.as_deref() == Some("BLOB") {
+                func("sf_binary_substr", vec![value, start, length.unwrap_or_else(|| number(i64::MAX / 4))])
+            } else {
+                func("substr", std::iter::once(value).chain([start]).chain(length).collect())
+            }
+        }
         "TO_CHAR" | "TO_VARCHAR" => match opt_arg(1)? {
             Some(format) => to_char(ctx, arg(0)?, &format, &name)?,
             None => crate::typing::text(ctx, arg(0)?),
@@ -808,6 +829,57 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             )
         }
         "CHECK_XML" => func("sf_check_xml", vec![arg(0)?]),
+        // ENCRYPT(value, passphrase [, [aad,] method]) and DECRYPT likewise.
+        "ENCRYPT" | "DECRYPT" | "TRY_DECRYPT" => {
+            let args = args()?;
+            let (aad, method) = match args.len() {
+                2 => (null(), string("AES-GCM")),
+                3 => (null(), args[2].clone()),
+                4 => (args[2].clone(), args[3].clone()),
+                _ => return Err(SqlError::Arguments(name.clone())),
+            };
+            let mut call = vec![func("sf_blob", vec![arg(0)?]), cast(arg(1)?, DataType::Varchar(None))];
+            // DuckDB skips functions with a NULL argument, so a missing AAD is empty.
+            call.extend([func("sf_blob_or_empty", vec![aad]), cast(method, DataType::Varchar(None))]);
+            match name.as_str() {
+                "ENCRYPT" => func("sf_encrypt", call),
+                _ => {
+                    call.push(Expr::Value(Value::Boolean(name == "TRY_DECRYPT").into()));
+                    func("sf_decrypt", call)
+                }
+            }
+        }
+        // ENCRYPT_RAW(value, key, iv [, [aad,] method]): an object of BINARY ciphertext, iv and tag.
+        "ENCRYPT_RAW" => {
+            let args = args()?;
+            let (aad, method) = match args.len() {
+                3 => (null(), string("AES-GCM")),
+                4 => (null(), args[3].clone()),
+                5 => (args[3].clone(), args[4].clone()),
+                _ => return Err(SqlError::Arguments(name.clone())),
+            };
+            // An empty IV gets a random one; a missing AAD is empty.
+            let mut call = vec![func("sf_blob", vec![arg(0)?]), func("sf_blob", vec![arg(1)?])];
+            call.extend([arg(2)?, aad].map(|a| func("sf_blob_or_empty", vec![a])));
+            call.push(cast(method, DataType::Varchar(None)));
+            cast(func("sf_encrypt_raw", call), custom_type("VARIANT"))
+        }
+        // DECRYPT_RAW(value, key, iv [, [[aad,] method,] tag]).
+        "DECRYPT_RAW" | "TRY_DECRYPT_RAW" => {
+            let args = args()?;
+            let (aad, method, tag) = match args.len() {
+                3 => (null(), string("AES-GCM"), null()),
+                4 => (null(), string("AES-GCM"), args[3].clone()),
+                5 => (null(), args[3].clone(), args[4].clone()),
+                6 => (args[3].clone(), args[4].clone(), args[5].clone()),
+                _ => return Err(SqlError::Arguments(name.clone())),
+            };
+            let mut call: Vec<Expr> = [arg(0)?, arg(1)?, arg(2)?].map(|a| func("sf_blob", vec![a])).to_vec();
+            call.push(func("sf_blob_or_empty", vec![aad]));
+            call.extend([cast(method, DataType::Varchar(None)), func("sf_blob_or_empty", vec![tag])]);
+            call.push(Expr::Value(Value::Boolean(name == "TRY_DECRYPT_RAW").into()));
+            func("sf_decrypt_raw", call)
+        }
         "PARSE_IP" => {
             let permissive = cast(opt_arg(2)?.unwrap_or_else(|| number(0)), DataType::BigInt(None));
             cast(func("sf_parse_ip", vec![arg(0)?, arg(1)?, permissive]), custom_type("JSON"))
@@ -1489,6 +1561,13 @@ fn to_char(ctx: &Context, value: Expr, format: &Expr, function: &str) -> Result<
     let Some(format) = string_literal(format) else {
         return Err(SqlError::Unsupported(format!("non-literal format in {function}")));
     };
+    // Binary formats.
+    match format.to_uppercase().as_str() {
+        "UTF-8" | "UTF8" => return Ok(func("decode", vec![cast(value, DataType::Blob(None))])),
+        "HEX" => return Ok(func("upper", vec![func("hex", vec![cast(value, DataType::Blob(None))])])),
+        "BASE64" => return Ok(func("to_base64", vec![cast(value, DataType::Blob(None))])),
+        _ => {}
+    }
     if is_number_format(format) {
         return Ok(func("sf_format_number", vec![cast(value, DataType::Varchar(None)), string(format)]));
     }

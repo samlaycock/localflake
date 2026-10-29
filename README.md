@@ -184,7 +184,20 @@ differences between drivers.
   carry-over, `CONVERT_TIMEZONE` with the IANA database), semi-structured
   (`ARRAY_*`, `OBJECT_*`, `ARRAYS_ZIP`, `GET_IGNORE_CASE`, recursive
   `FLATTEN`), aggregate and window (`MEDIAN`, `MODE`, `MAX_BY`,
-  `APPROX_TOP_K`, `RATIO_TO_REPORT`, `CONDITIONAL_TRUE_EVENT`, `IGNORE NULLS`)
+  `APPROX_TOP_K`, `RATIO_TO_REPORT`, `CONDITIONAL_TRUE_EVENT`,
+  `INTERPOLATE_FFILL|BFILL|LINEAR`, `IGNORE NULLS`)
+- Sketches and their states: `HLL_ACCUMULATE|COMBINE|ESTIMATE|EXPORT|IMPORT`,
+  `APPROX_PERCENTILE_*` and `APPROX_TOP_K_*` states, `MINHASH`,
+  `MINHASH_COMBINE` and `APPROXIMATE_SIMILARITY`, and the bitmap functions
+  (`BITMAP_CONSTRUCT_AGG`, `BITMAP_OR_AGG`, `BITMAP_AND_AGG`, `BITMAP_COUNT`,
+  ...) in Snowflake's documented bitmap layout
+- XML (`PARSE_XML`, `XMLGET`, `CHECK_XML`, `TO_XML`, with XML values printing
+  as XML), `PARSE_IP`, `SEARCH_IP` and `SEARCH` (all three analyzers and
+  search modes), `ENCRYPT_RAW`/`DECRYPT_RAW` (standard AES in GCM, CBC, ECB,
+  CTR, OFB and CFB modes) and `ENCRYPT`/`DECRYPT`
+- Context functions such as `CURRENT_STATEMENT`, `CURRENT_TRANSACTION`,
+  `LAST_TRANSACTION`, `GETVARIABLE` and `IS_ROLE_IN_SESSION`, and
+  `SYSTEM$WAIT`, `SYSTEM$CANCEL_ALL_QUERIES` and `SYSTEM$GET_TZDB_VERSION`
 - `TO_CHAR`/`TO_NUMBER` numeric format models (`9,999.99`, `$`, `S`, `MI`,
   `FM`) and date/time formats; implicit conversions to text follow the session's
   `*_OUTPUT_FORMAT` parameters (timestamps print as `2024-01-02 03:04:05.000`)
@@ -309,6 +322,25 @@ types known.
   dimensions are an error in both). gosnowflake can't decode `VECTOR` columns in
   Arrow results, so Go applications need JSON results
   (`GO_QUERY_RESULT_FORMAT = 'JSON'`) to read them.
+- Sketch states are exact, so estimates (`HLL_ESTIMATE`,
+  `APPROX_PERCENTILE_ESTIMATE`, `APPROX_TOP_K_ESTIMATE`) are exact too, and the
+  states use localflake's own formats (HyperLogLog states and `HLL_EXPORT`
+  output differ from Snowflake's). MinHash uses different hash functions, so
+  `APPROXIMATE_SIMILARITY` estimates differ slightly. `HLL_ACCUMULATE(*)`,
+  `MINHASH(k, *)` and the `*` form of `SEARCH`/`SEARCH_IP` aren't supported.
+- `ENCRYPT`/`DECRYPT` derive their key differently from Snowflake (which uses an
+  internal seed), so they only decrypt what localflake encrypted;
+  `ENCRYPT_RAW`/`DECRYPT_RAW` are standard AES and interoperate.
+- BINARY values inside a VARIANT (such as `ENCRYPT_RAW`'s fields) print as
+  escaped bytes rather than hex, though `AS_BINARY(GET(...))` reads them back.
+- With no access control, `IS_ROLE_IN_SESSION`, `IS_DATABASE_ROLE_IN_SESSION`
+  and `IS_GRANTED_TO_INVOKER_ROLE` are always TRUE. `SEARCH`'s
+  `UNICODE_ANALYZER` approximates Unicode word segmentation, and
+  `SYSTEM$WAIT` can't be cancelled while it waits.
+- Functions not implemented: `GET_DDL`, `MAP_*` (no MAP type), the
+  `GEOGRAPHY`/`GEOMETRY` and `ST_*`/`H3_*` functions, `DECFLOAT`,
+  `TO_IPADDRESS`, Cortex and AI functions, and account-level `SYSTEM$`
+  functions.
 - Materialized views and dynamic tables are views, so they're always up to
   date: a dynamic table never lags behind its sources, and `TARGET_LAG`,
   `WAREHOUSE` and `REFRESH_MODE` are only recorded for `SHOW DYNAMIC TABLES`

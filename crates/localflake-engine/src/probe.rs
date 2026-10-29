@@ -167,6 +167,7 @@ unsafe fn type_name(logical: ffi::duckdb_logical_type) -> String {
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIMESTAMP_TZ => "TIMESTAMPTZ",
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIMESTAMP_NS => "TIMESTAMP_NS",
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_VARIANT => "VARIANT",
+        ffi::DUCKDB_TYPE_DUCKDB_TYPE_BLOB => "BLOB",
         _ => "OTHER",
     };
     name.to_owned()
