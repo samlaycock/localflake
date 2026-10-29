@@ -1,0 +1,143 @@
+# Functions added to fill gaps in Snowflake's function reference. Expected
+# results are the examples in each function's documentation.
+
+query
+select soundex('Pfister'), soundex_p123('Pfister'), soundex('Lloyd'), soundex_p123('Lloyd')
+----
+P236|P123|L300|L430
+
+query
+select array_remove_at([2, 5, 7], 0), array_remove_at([2, 5, 7], -1), array_remove_at([2, 5, 7], 10), array_remove_at([2, 5, 7], null)
+----
+[5,7]|[2,5]|[2,5,7]|NULL
+
+query
+select array_repeat(42, 3), array_repeat('hello', 2), array_repeat([1, 2], 2), array_repeat('x', 0), array_repeat('hi', null)
+----
+[42,42,42]|["hello","hello"]|[[1,2],[1,2]]|[]|NULL
+
+query
+select arrays_to_object(['key1', 'key2', 'key3'], [1, 2, 3]), arrays_to_object(['key1', null, 'key3'], [1, 2, 3]), arrays_to_object(['key1', 'key2', 'key3'], [1, null, 3])
+----
+{"key1":1,"key2":2,"key3":3}|{"key1":1,"key3":3}|{"key1":1,"key2":null,"key3":3}
+
+error 215001
+select arrays_to_object(['a', 'b'], [1])
+
+query
+select regexp_substr_all('a1_a2a3_a4A5a6', 'a[[:digit:]]'), regexp_substr_all('a1_a2a3_a4A5a6', 'a[[:digit:]]', 2), regexp_substr_all('a1_a2a3_a4A5a6', 'a[[:digit:]]', 1, 3)
+----
+["a1","a2","a3","a4","a6"]|["a2","a3","a4","a6"]|["a3","a4","a6"]
+
+query
+select regexp_substr_all('a1_a2a3_a4A5a6', 'a[[:digit:]]', 1, 1, 'i'), regexp_substr_all('a1_a2a3_a4A5a6', '(a)([[:digit:]])', 1, 1, 'ie'), regexp_extract_all('a1_a2a3_a4A5a6', 'b')
+----
+["a1","a2","a3","a4","A5","a6"]|["a","a","a","a","A","a"]|[]
+
+statement ok
+create table substr_all (string1 varchar)
+
+statement ok
+insert into substr_all values ('A MAN A PLAN A CANAL')
+
+query
+select regexp_substr_all(string1, 'A\\W+(\\w+)', 1, 1, 'e', 1), regexp_substr_all(string1, 'A\\W+(\\w+)', 1, 2, 'e', 1), regexp_substr_all(string1, 'A\\W+(\\w)(\\w)(\\w)', 1, 1, 'e', 2) from substr_all
+----
+["MAN","PLAN","CANAL"]|["PLAN","CANAL"]|["A","L","A"]
+
+statement ok
+create table nulls_test (col_1 integer, col_2 integer, col_3 integer, col_4 float)
+
+statement ok
+insert into nulls_test values (1, 2, 3, 4.25), (2, 4, -1, null), (3, 6, null, -2.75)
+
+query
+select greatest_ignore_nulls(col_1, col_2, col_3, col_4), least_ignore_nulls(col_1, col_2, col_3, col_4) from nulls_test order by col_1
+----
+4.25|1
+4|-1
+6|-2.75
+
+query types
+select regr_valx(null, 10), regr_valx(1, null), regr_valx(1, 10), regr_valy(null, 10), regr_valy(1, null), regr_valy(1, 10)
+----
+FLOAT|FLOAT|FLOAT|FLOAT|FLOAT|FLOAT
+NULL|NULL|10|NULL|NULL|1
+
+statement ok
+create table vardttm (v variant)
+
+statement ok
+insert into vardttm select to_variant(to_date('2024-02-24'))
+
+statement ok
+insert into vardttm select to_variant(to_time('20:57:01'))
+
+statement ok
+insert into vardttm select to_variant(to_timestamp_ntz('2021-02-24 14:00:00.123'))
+
+statement ok
+insert into vardttm select to_variant(to_timestamp_tz('2020-02-24 15:00:00.123 +01:00'))
+
+query rowsort
+select typeof(v), is_date(v), is_date_value(v), is_time(v), is_timestamp_ntz(v), is_timestamp_tz(v) from vardttm
+----
+DATE|true|true|false|false|false
+TIME|false|false|true|false|false
+TIMESTAMP_NTZ|false|false|false|true|false
+TIMESTAMP_TZ|false|false|false|false|true
+
+statement ok
+alter session set timezone = 'America/New_York'
+
+query
+select timestamp_ltz_from_parts(2013, 4, 5, 12, 00, 00), timestamp_tz_from_parts(2013, 4, 5, 12, 00, 00), timestamp_tz_from_parts(2013, 4, 5, 12, 00, 00, 0, 'America/Los_Angeles')
+----
+2013-04-05 16:00:00 Z|2013-04-05 12:00:00 -0400|2013-04-05 12:00:00 -0700
+
+query
+select 2.71, current_statement();
+----
+2.71|select 2.71, current_statement();
+
+statement ok
+set my_local_variable = 'my_local_variable_value'
+
+statement ok
+set var_2 = 'value_2'
+
+query
+select getvariable('MY_LOCAL_VARIABLE'), getvariable('var_2'), getvariable('VAR_2'), getvariable('MISSING')
+----
+my_local_variable_value|NULL|value_2|NULL
+
+query
+select current_transaction(), last_transaction()
+----
+NULL|NULL
+
+statement ok
+begin
+
+query
+select length(current_transaction()), last_transaction()
+----
+19|NULL
+
+statement ok
+commit
+
+query
+select current_transaction(), length(last_transaction())
+----
+NULL|19
+
+query
+select invoker_role(), invoker_share(), is_role_in_session('ANALYST'), is_database_role_in_session('R1'), is_granted_to_invoker_role('ANALYST'), is_role_in_session(null)
+----
+ACCOUNTADMIN|NULL|true|true|true|NULL
+
+query
+select system$wait(10, 'MILLISECONDS'), system$wait(0), system$get_tag('cost_center', 'my_table', 'table'), length(system$get_tzdb_version())
+----
+waited 10 milliseconds|waited 0 seconds|NULL|5

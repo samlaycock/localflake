@@ -1080,6 +1080,7 @@ dependencies = [
 name = "localflake-sql"
 version = "0.1.3"
 dependencies = [
+ "chrono-tz",
  "sqlparser",
  "thiserror",
 ]

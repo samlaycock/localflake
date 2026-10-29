@@ -125,6 +125,8 @@ impl From<duckdb::Error> for EngineError {
             ("Date '", "100040", "22007"),
             ("Boolean value '", "100037", "22018"),
             ("Number out of representable range", "100046", "22003"),
+            ("Key array and value array had unequal lengths", "215001", "22000"),
+            ("Key supplied for ARRAYS_TO_OBJECT", "215002", "22000"),
         ] {
             if let Some(start) = first_line.find(pattern) {
                 return Self::new(code, state, first_line[start..].trim_end_matches(['"', '\'']).to_owned());

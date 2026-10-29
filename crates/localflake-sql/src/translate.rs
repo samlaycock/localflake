@@ -185,16 +185,25 @@ impl StatementKind {
 
 /// Splits Snowflake SQL text into statements, normalizing identifier case.
 pub fn split(sql: &str) -> Result<Vec<String>, SqlError> {
-    let normalized = normalize_identifiers(sql)?;
-    let tokens = Tokenizer::new(&SnowflakeDialect, &normalized).tokenize_with_location()?;
-    let offsets = crate::normalize::LineOffsets::new(&normalized);
+    split_text(&normalize_identifiers(sql)?)
+}
+
+/// Splits Snowflake SQL text into statements as written, for `CURRENT_STATEMENT()`.
+/// Normalizing doesn't add or remove statements, so these line up with [`split`].
+pub fn split_original(sql: &str) -> Result<Vec<String>, SqlError> {
+    split_text(sql)
+}
+
+fn split_text(normalized: &str) -> Result<Vec<String>, SqlError> {
+    let tokens = Tokenizer::new(&SnowflakeDialect, normalized).tokenize_with_location()?;
+    let offsets = crate::normalize::LineOffsets::new(normalized);
     let mut statements = Vec::new();
     let mut start = 0;
     let mut has_content = false;
     for twl in &tokens {
         match &twl.token {
             Token::SemiColon => {
-                let end = offsets.byte_offset(&normalized, twl.span.start.line, twl.span.start.column);
+                let end = offsets.byte_offset(normalized, twl.span.start.line, twl.span.start.column);
                 if has_content {
                     statements.push(normalized[start..end].trim().to_owned());
                 }

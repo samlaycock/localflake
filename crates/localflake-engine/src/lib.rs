@@ -314,6 +314,7 @@ impl Engine {
         functions::register(&root)?;
         let running = cancel::Running::open();
         root.register_scalar_function_with_state::<cancel::CancelQuery>("sf_cancel_query", &running)?;
+        root.register_scalar_function_with_state::<cancel::CancelAllQueries>("sf_cancel_all_queries", &running)?;
         unsafe { probe::register(db.0) }.map_err(EngineError::internal)?;
         let icu = load_icu(&root);
         unsafe { tz::register(db.0) }.map_err(EngineError::internal)?;
@@ -481,6 +482,11 @@ impl Session {
     /// failures) are stored under their query IDs.
     pub fn execute(&mut self, request: &Request) -> Result<Vec<Arc<QueryResult>>, Failure> {
         let statements = localflake_sql::split(request.sql).map_err(|e| self.fail(e.into()))?;
+        // A single statement is reported as sent, with any trailing semicolon.
+        let original = match statements.len() {
+            1 => vec![request.sql.trim().to_owned()],
+            _ => localflake_sql::split_original(request.sql).unwrap_or_default(),
+        };
         let desired = request.statement_count.unwrap_or_else(|| {
             self.ctx.parameters.get("MULTI_STATEMENT_COUNT").and_then(|v| v.parse().ok()).unwrap_or(1)
         });
@@ -489,7 +495,8 @@ impl Session {
         }
         let timeout = self.statement_timeout();
         let mut results = Vec::with_capacity(statements.len());
-        for statement in &statements {
+        for (i, statement) in statements.iter().enumerate() {
+            self.ctx.statement = original.get(i).cloned().unwrap_or_else(|| statement.clone());
             let query_id = new_query_id();
             let bindings = if statements.len() == 1 { request.bindings.as_slice() } else { &[] };
             let result = match request.cancel.error(timeout) {
@@ -529,7 +536,13 @@ impl Session {
         timeout: u64,
     ) -> Result<QueryResult, EngineError> {
         let limit = (timeout > 0).then(|| std::time::Duration::from_secs(timeout));
-        let running = self.engine.inner.running.start(query_id, &request.cancel, self.interrupt.clone(), limit);
+        let running = self.engine.inner.running.start(
+            query_id,
+            self.ctx.session_id,
+            &request.cancel,
+            self.interrupt.clone(),
+            limit,
+        );
         let result = self.run_statement(statement, query_id, bindings, request.describe_only);
         drop(running);
         let Some(error) = request.cancel.error(timeout) else { return result };
@@ -582,8 +595,16 @@ impl Session {
         Ok(command?)
     }
 
+    fn begin_transaction(&mut self) -> Result<(), EngineError> {
+        self.conn.execute_batch("BEGIN TRANSACTION")?;
+        self.in_transaction = true;
+        self.ctx.transaction = Some(new_transaction_id());
+        Ok(())
+    }
+
     fn end_transaction(&mut self, sql: &str) -> Result<(), EngineError> {
         self.in_transaction = false;
+        self.ctx.last_transaction = self.ctx.transaction.take();
         self.transaction_log.clear();
         if std::mem::take(&mut self.transaction_failed) {
             self.conn.execute_batch("ROLLBACK")?;
@@ -818,8 +839,7 @@ impl Session {
                     // Snowflake ignores BEGIN inside a transaction and COMMIT/ROLLBACK outside one.
                     if begin != self.in_transaction {
                         if begin {
-                            self.conn.execute_batch(&command.sql)?;
-                            self.in_transaction = true;
+                            self.begin_transaction()?;
                         } else {
                             self.end_transaction(&command.sql)?;
                         }
@@ -833,8 +853,7 @@ impl Session {
                     && !self.in_transaction
                     && !self.autocommit() =>
                 {
-                    self.conn.execute_batch("BEGIN TRANSACTION")?;
-                    self.in_transaction = true;
+                    self.begin_transaction()?;
                 }
                 _ => {}
             }
@@ -1271,6 +1290,16 @@ fn duckdb_type(data_type: &DataType) -> String {
 
 fn new_query_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// A transaction ID: like Snowflake's, a 19-digit number from the start time.
+fn new_transaction_id() -> String {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    // Strictly increasing, even for transactions started in the same nanosecond.
+    let next = |last: u64| last.max(nanos.saturating_sub(1)) + 1;
+    let last = LAST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(next(last))).unwrap_or_default();
+    next(last).to_string()
 }
 
 fn ident(name: &str) -> String {

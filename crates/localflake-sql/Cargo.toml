@@ -11,3 +11,4 @@ categories.workspace = true
 [dependencies]
 sqlparser.workspace = true
 thiserror.workspace = true
+chrono-tz.workspace = true

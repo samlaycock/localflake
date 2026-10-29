@@ -78,6 +78,25 @@ CREATE OR REPLACE TEMP MACRO sf_vector_l1_distance(a, b) AS
     CASE WHEN len(a) = len(b)
         THEN list_sum(list_transform(sf_vector(a), lambda x, i: abs(x - sf_vector(b)[i])))
         WHEN a IS NOT NULL AND b IS NOT NULL THEN error('vector_l1_distance: vector dimensions must be equal') END;
+CREATE OR REPLACE TEMP MACRO sf_array_index(a, pos) AS
+    CASE WHEN pos < 0 THEN len(sf_variant_array(a)) + pos ELSE pos END;
+CREATE OR REPLACE TEMP MACRO sf_array_remove_at(a, pos) AS
+    CASE WHEN pos IS NULL THEN NULL
+        WHEN sf_array_index(a, pos) NOT BETWEEN 0 AND len(sf_variant_array(a)) - 1 THEN CAST(a AS VARIANT)
+        ELSE CAST(list_concat(sf_variant_array(a)[1:sf_array_index(a, pos)],
+            sf_variant_array(a)[sf_array_index(a, pos) + 2:]) AS VARIANT) END;
+CREATE OR REPLACE TEMP MACRO sf_array_repeat(e, n) AS
+    CASE WHEN n IS NOT NULL THEN CAST(list_transform(range(greatest(n, 0)), lambda i: CAST(e AS VARIANT)) AS VARIANT) END;
+CREATE OR REPLACE TEMP MACRO sf_arrays_to_object(k, v) AS
+    CASE WHEN len(sf_variant_array(k)) <> len(sf_variant_array(v))
+            THEN error('Key array and value array had unequal lengths in ARRAYS_TO_OBJECT')
+        WHEN list_bool_or(list_transform(sf_variant_array(k), lambda x: x IS NOT NULL AND sf_typeof(x) <> 'VARCHAR'))
+            THEN error('Key supplied for ARRAYS_TO_OBJECT does not have string type')
+        ELSE CAST(map(
+            list_transform(list_filter(range(len(sf_variant_array(k))), lambda i: sf_variant_array(k)[i + 1] IS NOT NULL),
+                lambda i: CAST(sf_variant_array(k)[i + 1] AS VARCHAR)),
+            list_transform(list_filter(range(len(sf_variant_array(k))), lambda i: sf_variant_array(k)[i + 1] IS NOT NULL),
+                lambda i: coalesce(sf_variant_array(v)[i + 1], sf_json_null()))) AS JSON) END;
 CREATE OR REPLACE TEMP MACRO sf_tokens(s, d) AS
     list_filter(string_split_regex(s, '[' || regexp_escape(d) || ']'), lambda t: t <> '');
 CREATE OR REPLACE TEMP MACRO sf_array_to_string(a, sep) AS
@@ -192,6 +211,7 @@ const OBJECT_RESULTS: &[&str] = &[
     "PARSE_URL",
     "TO_OBJECT",
     "AS_OBJECT",
+    "ARRAYS_TO_OBJECT",
 ];
 
 /// Functions whose Snowflake result type is ARRAY.
@@ -225,6 +245,10 @@ const ARRAY_RESULTS: &[&str] = &[
     "FILTER",
     "TRANSFORM",
     "APPROX_TOP_K",
+    "REGEXP_SUBSTR_ALL",
+    "REGEXP_EXTRACT_ALL",
+    "ARRAY_REMOVE_AT",
+    "ARRAY_REPEAT",
 ];
 
 fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlError> {
@@ -273,6 +297,16 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             let any_null = or_all(args.iter().cloned().map(is_null).collect());
             case(vec![(any_null, null())], Some(func(&name.to_lowercase(), args)))
         }
+        // DuckDB's GREATEST and LEAST already skip NULLs.
+        "GREATEST_IGNORE_NULLS" => func("greatest", args()?),
+        "LEAST_IGNORE_NULLS" => func("least", args()?),
+        // NULL if either argument is; otherwise the independent (x) or dependent (y) value.
+        "REGR_VALX" | "REGR_VALY" => {
+            let (y, x) = (arg(0)?, arg(1)?);
+            let either_null = or_all(vec![is_null(y.clone()), is_null(x.clone())]);
+            let value = if name == "REGR_VALX" { x } else { y };
+            case(vec![(either_null, null())], Some(cast(value, DataType::Double(ExactNumberInfo::None))))
+        }
 
         // Strings.
         // Characters for text, bytes for BINARY.
@@ -297,6 +331,7 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             DataType::BigInt(None),
         ),
         "SOUNDEX" => func("sf_soundex", vec![arg(0)?]),
+        "SOUNDEX_P123" => func("sf_soundex_p123", vec![arg(0)?]),
         "INSERT" => func("sf_insert", vec![arg(0)?, arg(1)?, arg(2)?, arg(3)?]),
         "RANDSTR" => func("sf_randstr", vec![arg(0)?]),
         "PARSE_URL" => func("sf_json_variant", vec![func("sf_parse_url", vec![arg(0)?])]),
@@ -375,6 +410,20 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             let flags = string(regexp_flags(params.as_ref()));
             let all = func("regexp_extract_all", vec![subject, arg(1)?, group, flags]);
             nullif_empty(func("list_extract", vec![all, occurrence]))
+        }
+        "REGEXP_SUBSTR_ALL" | "REGEXP_EXTRACT_ALL" => {
+            let params = opt_arg(4)?;
+            let extract = params.as_ref().and_then(string_literal).is_some_and(|p| p.contains('e'));
+            let default_group = number(if extract { 1 } else { 0 });
+            let group = opt_arg(5)?.unwrap_or(default_group);
+            let position = opt_arg(2)?.unwrap_or_else(|| number(1));
+            let occurrence = opt_arg(3)?.unwrap_or_else(|| number(1));
+            let subject = func("substr", vec![arg(0)?, position]);
+            let flags = string(regexp_flags(params.as_ref()));
+            let all = func("regexp_extract_all", vec![subject, arg(1)?, group, flags]);
+            // Matches from the `occurrence`th on.
+            let from = func("list_slice", vec![all.clone(), occurrence, func("len", vec![all])]);
+            cast(from, custom_type("VARIANT"))
         }
         "REGEXP_COUNT" => {
             let subject = func("substr", vec![arg(0)?, opt_arg(2)?.unwrap_or_else(|| number(1))]);
@@ -587,6 +636,22 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             let midnight = cast(string("00:00:00"), DataType::Time(None, TimezoneInfo::None));
             binop(midnight, BinaryOperator::Plus, seconds_interval(arg(0)?, arg(1)?, with_nanos(arg(2)?, opt_arg(3)?)))
         }
+        // Wall-clock parts in the session's time zone.
+        "TIMESTAMP_LTZ_FROM_PARTS" | "TIMESTAMPLTZFROMPARTS" => {
+            let day = date_from_parts(arg(0)?, arg(1)?, arg(2)?);
+            let time = seconds_interval(arg(3)?, arg(4)?, with_nanos(arg(5)?, opt_arg(6)?));
+            let wall = cast(binop(day, BinaryOperator::Plus, time), DataType::Timestamp(None, TimezoneInfo::None));
+            func("sf_ltz", vec![wall])
+        }
+        // Wall-clock parts in the given zone, or the session's.
+        "TIMESTAMP_TZ_FROM_PARTS" | "TIMESTAMPTZFROMPARTS" => {
+            let day = date_from_parts(arg(0)?, arg(1)?, arg(2)?);
+            let time = seconds_interval(arg(3)?, arg(4)?, with_nanos(arg(5)?, opt_arg(6)?));
+            let wall = cast(binop(day, BinaryOperator::Plus, time), DataType::Timestamp(None, TimezoneInfo::None));
+            let zone = opt_arg(7)?.unwrap_or_else(|| crate::typing::session_timezone(ctx));
+            let utc = func("sf_convert_timezone", vec![zone.clone(), string("UTC"), wall]);
+            func("sf_tz_in_zone", vec![func("timezone", vec![string("UTC"), utc]), zone])
+        }
         "TIMESTAMP_FROM_PARTS" | "TIMESTAMPFROMPARTS" | "TIMESTAMP_NTZ_FROM_PARTS" | "TIMESTAMPNTZFROMPARTS" => {
             match args()?.len() {
                 2 => binop(arg(0)?, BinaryOperator::Plus, arg(1)?),
@@ -768,6 +833,9 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         "ARRAY_EXCEPT" => func("sf_array_except", vec![arg(0)?, arg(1)?]),
         "ARRAYS_OVERLAP" => func("sf_arrays_overlap", vec![arg(0)?, arg(1)?]),
         "ARRAY_INSERT" => func("sf_array_insert", vec![arg(0)?, arg(1)?, arg(2)?]),
+        "ARRAY_REMOVE_AT" => func("sf_array_remove_at", vec![arg(0)?, arg(1)?]),
+        "ARRAY_REPEAT" => func("sf_array_repeat", vec![arg(0)?, arg(1)?]),
+        "ARRAYS_TO_OBJECT" => func("sf_arrays_to_object", vec![arg(0)?, arg(1)?]),
         "ARRAY_FLATTEN" => func("sf_array_flatten", vec![arg(0)?]),
         "ARRAY_REVERSE" => {
             cast(func("list_reverse", vec![func("sf_variant_array", vec![arg(0)?])]), custom_type("VARIANT"))
@@ -853,9 +921,11 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         // `random()` keeps DuckDB from folding the call, and cancelling, when it only prepares the statement.
         "SYSTEM$CANCEL_QUERY" => func("sf_cancel_query", vec![arg(0)?, func("random", vec![])]),
         "IS_OBJECT" | "IS_ARRAY" | "IS_INTEGER" | "IS_DECIMAL" | "IS_DOUBLE" | "IS_REAL" | "IS_BOOLEAN" | "IS_CHAR"
-        | "IS_VARCHAR" | "IS_DATE" | "IS_TIMESTAMP_NTZ" | "IS_TIMESTAMP_LTZ" | "IS_BINARY" => {
+        | "IS_VARCHAR" | "IS_DATE" | "IS_DATE_VALUE" | "IS_TIME" | "IS_TIMESTAMP_NTZ" | "IS_TIMESTAMP_LTZ"
+        | "IS_TIMESTAMP_TZ" | "IS_BINARY" => {
             let types: &[&str] = match &name[3..] {
                 "DECIMAL" => &["INTEGER", "DECIMAL"],
+                "DATE_VALUE" => &["DATE"],
                 "DOUBLE" | "REAL" => &["INTEGER", "DECIMAL", "DOUBLE"],
                 "CHAR" | "VARCHAR" => &["VARCHAR"],
                 other => &[other][..],
@@ -1053,7 +1123,38 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
         "CURRENT_ROLE_TYPE" => string("ROLE"),
         "CURRENT_AVAILABLE_ROLES" => string(format!("[\"{}\"]", ctx.role.as_deref().unwrap_or("ACCOUNTADMIN"))),
         "CURRENT_SECONDARY_ROLES" => string("{\"roles\":\"\",\"value\":\"\"}"),
-        "CURRENT_TRANSACTION" => null(),
+        "CURRENT_TRANSACTION" => optional_string(ctx.transaction.as_deref()),
+        "LAST_TRANSACTION" => optional_string(ctx.last_transaction.as_deref()),
+        // Session variables (`SET x = ...`), by name; NULL if unset.
+        "GETVARIABLE" => {
+            let Some(name) = string_literal(&arg(0)?).map(str::to_owned) else {
+                return Err(SqlError::Unsupported("GETVARIABLE with a non-literal name".into()));
+            };
+            // Variables are stored upper-cased, and GETVARIABLE doesn't fold case.
+            match ctx.variables.get(&name) {
+                Some(value) => crate::typing::text(ctx, parse_expr(value)),
+                None => cast(null(), DataType::Varchar(None)),
+            }
+        }
+        // Tags are accepted but not stored.
+        "SYSTEM$GET_TAG" => cast(null(), DataType::Varchar(None)),
+        "CURRENT_STATEMENT" => string(&ctx.statement),
+        // No access control: every role is active and granted.
+        "IS_ROLE_IN_SESSION" | "IS_DATABASE_ROLE_IN_SESSION" | "IS_GRANTED_TO_INVOKER_ROLE" => {
+            case(vec![(is_null(arg(0)?), null())], Some(Expr::Value(Value::Boolean(true).into())))
+        }
+        "SYSTEM$WAIT" => {
+            let unit = opt_arg(1)?.unwrap_or_else(|| string("SECONDS"));
+            func("sf_wait", vec![cast(arg(0)?, DataType::Double(ExactNumberInfo::None)), unit, func("random", vec![])])
+        }
+        "SYSTEM$CANCEL_ALL_QUERIES" => func(
+            "sf_cancel_all_queries",
+            vec![cast(arg(0)?, DataType::BigInt(None)), number(ctx.session_id as i64), func("random", vec![])],
+        ),
+        "SYSTEM$GET_TZDB_VERSION" => string(chrono_tz::IANA_TZDB_VERSION),
+        // Outside stored procedures, the invoker is the session's role, and nothing runs in a share.
+        "INVOKER_ROLE" => optional_string(ctx.role.as_deref()),
+        "INVOKER_SHARE" => null(),
         "LAST_QUERY_ID" => {
             let n = opt_arg(0)?.as_ref().and_then(integer_literal).unwrap_or(-1);
             optional_string(ctx.last_query_id(n))
