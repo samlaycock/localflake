@@ -637,7 +637,7 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             try_if(&name, converted)
         }
         "TO_CHAR" | "TO_VARCHAR" => match opt_arg(1)? {
-            Some(format) => to_char(arg(0)?, &format, &name)?,
+            Some(format) => to_char(ctx, arg(0)?, &format, &name)?,
             None => crate::typing::text(ctx, arg(0)?),
         },
         "CURRENT_TIMESTAMP" | "GETDATE" | "SYSTIMESTAMP" | "LOCALTIMESTAMP" => func("get_current_timestamp", vec![]),
@@ -1093,21 +1093,18 @@ fn strptime(value: Expr, format: &Expr, function: &str) -> Result<Expr, SqlError
     })
 }
 
-fn to_char(value: Expr, format: &Expr, function: &str) -> Result<Expr, SqlError> {
+fn to_char(ctx: &Context, value: Expr, format: &Expr, function: &str) -> Result<Expr, SqlError> {
     let Some(format) = string_literal(format) else {
         return Err(SqlError::Unsupported(format!("non-literal format in {function}")));
     };
     if is_number_format(format) {
         return Ok(func("sf_format_number", vec![cast(value, DataType::Varchar(None)), string(format)]));
     }
-    let is_datetime = ["YY", "MM", "DD", "HH", "MI", "SS", "MON", "DY", "FF"]
+    let is_datetime = ["YY", "MM", "DD", "HH", "MI", "SS", "MON", "DY", "FF", "TZH", "TZM"]
         .iter()
         .any(|token| format.to_uppercase().contains(token));
     if is_datetime {
-        return Ok(match convert_format(format) {
-            Some(converted) => func("strftime", vec![value, string(converted)]),
-            None => func("sf_to_varchar", vec![value]),
-        });
+        return Ok(crate::typing::formatted_text(ctx, value, format));
     }
     // Numeric formats like '999,999.00': honour the number of decimals.
     let decimals =

@@ -290,50 +290,14 @@ pub fn text(ctx: &Context, value: Expr) -> Expr {
         Some(strftime) => func("strftime", vec![value, string(strftime)]),
         None => func("sf_to_varchar", vec![value]),
     };
-    let timestamp = |v: Expr| cast(v, DataType::Timestamp(None, sqlparser::ast::TimezoneInfo::None));
     match type_name.as_str() {
         "TIMESTAMP" => formatted(value, ntz()),
         "TIMESTAMP_NS" => {
-            // TIMESTAMP_TZ: local time at the value's own offset, then that offset.
             let own = parameter(ctx, "TIMESTAMP_TZ_OUTPUT_FORMAT");
             let format = if own.is_empty() { parameter(ctx, "TIMESTAMP_OUTPUT_FORMAT") } else { own };
-            let (token, colon) = if format.contains("TZH:TZM") { ("TZH:TZM", true) } else { ("TZHTZM", false) };
-            match format.split_once(token) {
-                Some((before, after)) => {
-                    let offset = func("sf_tz_offset_text", vec![value.clone(), boolean(colon)]);
-                    let mut text = binop(
-                        formatted(timestamp(value.clone()), before.to_owned()),
-                        BinaryOperator::StringConcat,
-                        offset,
-                    );
-                    if !after.is_empty() {
-                        text = binop(text, BinaryOperator::StringConcat, formatted(timestamp(value), after.to_owned()));
-                    }
-                    text
-                }
-                None => formatted(timestamp(value), format),
-            }
+            zoned_text(value, &format, "sf_tz_offset_text")
         }
-        "TIMESTAMPTZ" => {
-            // Local wall time in the session's time zone, then its offset.
-            let format = ltz_format();
-            let (token, colon) = if format.contains("TZH:TZM") { ("TZH:TZM", true) } else { ("TZHTZM", false) };
-            match format.split_once(token) {
-                Some((before, after)) => {
-                    let offset = func("sf_tz_offset", vec![value.clone(), boolean(colon)]);
-                    let mut text = binop(
-                        formatted(timestamp(value.clone()), before.to_owned()),
-                        BinaryOperator::StringConcat,
-                        offset,
-                    );
-                    if !after.is_empty() {
-                        text = binop(text, BinaryOperator::StringConcat, formatted(timestamp(value), after.to_owned()));
-                    }
-                    text
-                }
-                None => formatted(timestamp(value), format),
-            }
-        }
+        "TIMESTAMPTZ" => zoned_text(value, &ltz_format(), "sf_tz_offset"),
         "DATE" => formatted(value, parameter(ctx, "DATE_OUTPUT_FORMAT")),
         "TIME" => {
             let epoch = cast(string("1970-01-01"), DataType::Date);
@@ -344,6 +308,74 @@ pub fn text(ctx: &Context, value: Expr) -> Expr {
         "VARIANT" => func("sf_variant_text_value", vec![value]),
         _ => func("sf_to_varchar", vec![value]),
     }
+}
+
+/// `TO_VARCHAR(value, format)` for a date/time format. TIMESTAMP_TZ and
+/// TIMESTAMP_LTZ values print their own wall time and offset; other values
+/// go straight to `strftime`.
+pub fn formatted_text(ctx: &Context, value: Expr, format: &str) -> Expr {
+    let type_name = match ctx.types.raw_site(std::slice::from_ref(&value), "sf_probe_text") {
+        RawSite::Probe(probe) => return *probe,
+        RawSite::Typed(t) => t.into_iter().next().unwrap_or_default(),
+        RawSite::Unknown => String::new(),
+    };
+    match type_name.as_str() {
+        "TIMESTAMP_NS" => zoned_text(value, format, "sf_tz_offset_text"),
+        "TIMESTAMPTZ" => zoned_text(value, format, "sf_tz_offset"),
+        _ => match convert_format(format) {
+            Some(strftime) => func("strftime", vec![value, string(strftime)]),
+            None => func("sf_to_varchar", vec![value]),
+        },
+    }
+}
+
+/// Formats a zoned timestamp: the format's offset tokens (`TZH:TZM`,
+/// `TZHTZM`, `TZH`, `TZM`) come from `offset_fn(value, colon)`, which gives
+/// `+hh[:]mm`, and everything else formats the value's local wall time.
+fn zoned_text(value: Expr, format: &str, offset_fn: &str) -> Expr {
+    let wall = cast(value.clone(), DataType::Timestamp(None, sqlparser::ast::TimezoneInfo::None));
+    let offset = |colon: bool| func(offset_fn, vec![value.clone(), boolean(colon)]);
+    let mut pieces = Vec::new();
+    let flush = |chunk: &mut String, pieces: &mut Vec<Expr>| {
+        if !chunk.is_empty() {
+            let strftime = convert_format(chunk).unwrap_or_default();
+            pieces.push(func("strftime", vec![wall.clone(), string(strftime)]));
+            chunk.clear();
+        }
+    };
+    let mut chunk = String::new();
+    let mut rest = format;
+    'outer: while !rest.is_empty() {
+        if let Some(stripped) = rest.strip_prefix('"') {
+            // Quoted literal text: keep the quotes for convert_format.
+            let end = stripped.find('"').map_or(rest.len(), |i| i + 2);
+            chunk.push_str(&rest[..end]);
+            rest = &rest[end..];
+            continue;
+        }
+        const TOKENS: [&str; 4] = ["TZH:TZM", "TZHTZM", "TZH", "TZM"];
+        for token in TOKENS {
+            if rest.len() >= token.len() && rest[..token.len()].eq_ignore_ascii_case(token) {
+                flush(&mut chunk, &mut pieces);
+                pieces.push(match token {
+                    "TZH:TZM" => offset(true),
+                    "TZHTZM" => offset(false),
+                    "TZH" => func("substr", vec![offset(false), number(1), number(3)]),
+                    _ => func("substr", vec![offset(false), number(4), number(2)]),
+                });
+                rest = &rest[token.len()..];
+                continue 'outer;
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        chunk.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    flush(&mut chunk, &mut pieces);
+    pieces
+        .into_iter()
+        .reduce(|text, piece| binop(text, BinaryOperator::StringConcat, piece))
+        .unwrap_or_else(|| string(""))
 }
 
 /// Conversion to TIMESTAMP_TZ. Temporal values and text go through the
