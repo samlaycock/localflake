@@ -200,6 +200,7 @@ async fn query(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -
         Ok(r) => r,
         Err(resp) => return resp,
     };
+    tracing::debug!(bindings = ?request.bindings, "query bindings");
     let bindings = match request.bindings.as_ref().map(bind_rows).transpose() {
         Ok(b) => b.unwrap_or_default(),
         Err(message) => return Json(Envelope::error("002049", message, Value::Null)).into_response(),
@@ -301,10 +302,16 @@ async fn query_status(State(state): State<AppState>, Path(query_id): Path<String
     let known_parent = state.multi_statement.lock().unwrap().contains_key(&query_id);
     let entry = match (known_parent, state.engine.result(&query_id)) {
         (true, _) | (_, Some(Ok(_))) => json!({ "id": query_id, "status": "SUCCESS", "state": "SUCCEEDED" }),
-        (_, Some(Err(err))) => json!({
-            "id": query_id, "status": "FAILED_WITH_ERROR", "state": "FAILED",
-            "errorCode": err.code, "errorMessage": err.message,
-        }),
+        (_, Some(Err(err))) => {
+            let entry = json!({
+                "id": query_id, "status": "FAILED_WITH_ERROR", "state": "FAILED",
+                "errorCode": err.code, "errorMessage": err.message, "sqlState": err.sql_state,
+            });
+            // The Node.js driver reads the code from the envelope and the SQLSTATE from `data`.
+            let mut envelope = Envelope::ok(json!({ "queries": [entry], "sqlState": err.sql_state }));
+            envelope.code = Some(err.code.to_owned());
+            return Json(envelope).into_response();
+        }
         (_, None) => return Json(Envelope::ok(json!({ "queries": [] }))).into_response(),
     };
     Json(Envelope::ok(json!({ "queries": [entry] }))).into_response()
