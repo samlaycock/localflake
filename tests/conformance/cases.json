@@ -1032,6 +1032,46 @@
       ]
     },
     {
+      "name": "binds/flatten-subquery-and-escape",
+      "steps": [
+        {
+          "sql": "create or replace table bind_calls (id varchar, account_id varchar, title varchar, ts timestamp_tz)"
+        },
+        {
+          "sql": "insert into bind_calls select value:ID::varchar, value:ACCOUNT_ID::varchar, value:TITLE::varchar, value:TS::varchar::timestamp_tz from table(flatten(input => parse_json('[{\"ID\":\"1\",\"ACCOUNT_ID\":\"A\",\"TITLE\":\"call title 1\",\"TS\":\"2026-01-01T12:00:00.000+00:00\"}]')))",
+          "rowcount": 1
+        },
+        {
+          "sql": "select to_varchar(ts, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM') as ts from bind_calls where account_id in (select value::string from table(flatten(input => parse_json(?))))",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "[\"A\"]"
+            }
+          ],
+          "rows": [
+            [
+              "2026-01-01T12:00:00.000+00:00"
+            ]
+          ]
+        },
+        {
+          "sql": "select id from bind_calls where title ilike ? escape '\\\\'",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "%title 1%"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        }
+      ]
+    },
+    {
       "name": "dml/row-counts",
       "steps": [
         {
