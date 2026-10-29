@@ -198,6 +198,10 @@ fn typed_placeholders(sql: &str, binds: &[Bind]) -> String {
 /// parameter (`parse_json($1)`, or one inside a lambda such as FLATTEN's, even
 /// when cast), so preparing the probe would record nothing. Probe SQL is only
 /// prepared, never run.
+///
+/// Text binds become string literals instead: like an untyped parameter, a
+/// literal takes its type from its context, whereas a VARCHAR can't be
+/// range-compared with a date or time (`d >= ?`), which fails the probe.
 fn probe_placeholders(sql: &str, binds: &[Bind]) -> String {
     if binds.is_empty() {
         return sql.to_owned();
@@ -206,9 +210,10 @@ fn probe_placeholders(sql: &str, binds: &[Bind]) -> String {
         let bind = binds.get(n.wrapping_sub(1))?;
         let type_name = match bind {
             Bind::Null => return Some("NULL".to_owned()),
+            Bind::Text(s) => return Some(format!("'{}'", s.replace('\'', "''"))),
             Bind::Bool(_) => "BOOLEAN",
             Bind::Int(_) | Bind::TimestampLtz(_) | Bind::TimestampTz { .. } => "BIGINT",
-            Bind::Decimal(_) | Bind::Text(_) => "VARCHAR",
+            Bind::Decimal(_) => "VARCHAR",
             Bind::Float(_) => "DOUBLE",
             Bind::Date(_) => "DATE",
             Bind::Time(_) => "TIME",

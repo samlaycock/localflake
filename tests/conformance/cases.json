@@ -1072,6 +1072,60 @@
       ]
     },
     {
+      "name": "binds/range-compared-to-dates",
+      "steps": [
+        {
+          "sql": "create or replace table bind_dates (d date, ts timestamp_tz)"
+        },
+        {
+          "sql": "insert into bind_dates select value:D::varchar::date, value:TS::varchar::timestamp_tz from table(flatten(input => parse_json('[{\"D\":\"2026-01-01\",\"TS\":\"2026-01-01T12:00:00.000+00:00\"}]')))",
+          "rowcount": 1
+        },
+        {
+          "sql": "select to_varchar(ts, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM') as ts from bind_dates where d >= ?",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "2025-10-28"
+            }
+          ],
+          "rows": [
+            [
+              "2026-01-01T12:00:00.000+00:00"
+            ]
+          ]
+        },
+        {
+          "sql": "select to_varchar(ts, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM') as ts from bind_dates where d < ?",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "2026-10-28"
+            }
+          ],
+          "rows": [
+            [
+              "2026-01-01T12:00:00.000+00:00"
+            ]
+          ]
+        },
+        {
+          "sql": "select to_varchar(ts, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM') as ts from bind_dates where ts >= ?",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "2026-01-01T00:00:00.000+00:00"
+            }
+          ],
+          "rows": [
+            [
+              "2026-01-01T12:00:00.000+00:00"
+            ]
+          ]
+        }
+      ]
+    },
+    {
       "name": "dml/row-counts",
       "steps": [
         {
