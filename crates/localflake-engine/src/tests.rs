@@ -546,3 +546,35 @@ fn local_directory_stage_and_put_descriptor() {
     assert!(transfer.stage_path.ends_with("/stages/INTERNAL/In/"), "{}", transfer.stage_path);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn bound(s: &mut Session, sql: &str, binds: Vec<Bind>) -> Vec<Vec<Option<String>>> {
+    match s.execute(&Request { sql, bindings: vec![binds], ..Default::default() }) {
+        Ok(results) => results[0].json_rows().unwrap(),
+        Err(failure) => panic!("{sql}: {}", failure.error),
+    }
+}
+
+#[test]
+fn binds_alongside_flatten_and_escapes() {
+    let mut s = session();
+    run(&mut s, "create table t (id varchar, account_id varchar, title varchar, ts timestamp_tz)");
+    run(
+        &mut s,
+        r#"insert into t select value:ID::varchar, value:ACCOUNT_ID::varchar, value:TITLE::varchar, value:TS::varchar::timestamp_tz
+           from table(flatten(input => parse_json('[{"ID":"1","ACCOUNT_ID":"A","TITLE":"call title 1","TS":"2026-01-01T12:00:00.000+00:00"}]')))"#,
+    );
+    let formatted = "to_varchar(ts, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3TZH:TZM')";
+    let expected = vec![vec![v("2026-01-01T12:00:00.000+00:00")]];
+    assert_eq!(
+        bound(&mut s, &format!("select {formatted} from t where id = ?"), vec![Bind::Text("1".into())]),
+        expected
+    );
+    let in_flatten = format!(
+        "select {formatted} from t where account_id in (select value::string from table(flatten(input => parse_json(?))))"
+    );
+    assert_eq!(bound(&mut s, &in_flatten, vec![Bind::Text(r#"["A"]"#.into())]), expected);
+    // `'\\'` is one backslash, also once `?` binds are renumbered.
+    let ilike = r"select id from t where title ilike ? escape '\\'";
+    assert_eq!(bound(&mut s, ilike, vec![Bind::Text("%title 1%".into())]), vec![vec![v("1")]]);
+    assert_eq!(bound(&mut s, r"select ? || 'a\\b'", vec![Bind::Text("x".into())]), vec![vec![v(r"xa\b")]]);
+}

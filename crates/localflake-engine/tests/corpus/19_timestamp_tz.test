@@ -108,3 +108,15 @@ query
 select to_varchar('2024-01-01 00:00:00 +00:00'::timestamp_ltz, 'YYYY-MM-DD HH24:MI TZH:TZM')
 ----
 2023-12-31 16:00 -08:00
+
+statement ok
+create or replace table tz_fmt_acct (id varchar, account_id varchar, ts timestamp_tz)
+
+statement ok
+insert into tz_fmt_acct select value:ID::varchar, value:ACCOUNT_ID::varchar, value:TS::varchar::timestamp_tz from table(flatten(input => parse_json('[{"ID":"1","ACCOUNT_ID":"A","TS":"2026-01-01T12:00:00.000+00:00"}]')))
+
+# A FLATTEN subquery elsewhere in the statement doesn't change the formatting.
+query
+select to_varchar(ts, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZH:TZM') from tz_fmt_acct where account_id in (select value::string from table(flatten(input => parse_json('["A"]'))))
+----
+2026-01-01T12:00:00.000+00:00

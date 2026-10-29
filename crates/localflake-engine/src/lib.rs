@@ -183,14 +183,49 @@ pub enum Bind {
 /// (see `Bind::to_value`): `$n` becomes `make_timestamp_ns($n)` for
 /// TIMESTAMP_TZ and the instant of that for TIMESTAMP_LTZ.
 fn typed_placeholders(sql: &str, binds: &[Bind]) -> String {
-    let wrap = |n: usize| match binds.get(n.wrapping_sub(1)) {
-        Some(Bind::TimestampLtz(_)) => Some(format!("sf_tz_instant(make_timestamp_ns(${n}))")),
-        Some(Bind::TimestampTz { .. }) => Some(format!("make_timestamp_ns(${n})")),
-        _ => None,
-    };
     if !binds.iter().any(|b| matches!(b, Bind::TimestampLtz(_) | Bind::TimestampTz { .. })) {
         return sql.to_owned();
     }
+    map_placeholders(sql, |n| match binds.get(n.wrapping_sub(1)) {
+        Some(Bind::TimestampLtz(_)) => Some(format!("sf_tz_instant(make_timestamp_ns(${n}))")),
+        Some(Bind::TimestampTz { .. }) => Some(format!("make_timestamp_ns(${n})")),
+        _ => None,
+    })
+}
+
+/// Replaces the placeholders of type-probe SQL with NULLs of their binds'
+/// types. DuckDB defers binding a statement to execution when it can't type a
+/// parameter (`parse_json($1)`, or one inside a lambda such as FLATTEN's, even
+/// when cast), so preparing the probe would record nothing. Probe SQL is only
+/// prepared, never run.
+fn probe_placeholders(sql: &str, binds: &[Bind]) -> String {
+    if binds.is_empty() {
+        return sql.to_owned();
+    }
+    map_placeholders(sql, |n| {
+        let bind = binds.get(n.wrapping_sub(1))?;
+        let type_name = match bind {
+            Bind::Null => return Some("NULL".to_owned()),
+            Bind::Bool(_) => "BOOLEAN",
+            Bind::Int(_) | Bind::TimestampLtz(_) | Bind::TimestampTz { .. } => "BIGINT",
+            Bind::Decimal(_) | Bind::Text(_) => "VARCHAR",
+            Bind::Float(_) => "DOUBLE",
+            Bind::Date(_) => "DATE",
+            Bind::Time(_) => "TIME",
+            Bind::Timestamp(_) => "TIMESTAMP",
+            Bind::Binary(_) => "BLOB",
+        };
+        let typed = format!("CAST(NULL AS {type_name})");
+        Some(match bind {
+            Bind::TimestampLtz(_) => format!("sf_tz_instant(make_timestamp_ns({typed}))"),
+            Bind::TimestampTz { .. } => format!("make_timestamp_ns({typed})"),
+            _ => typed,
+        })
+    })
+}
+
+/// Replaces each `$n` placeholder outside quotes with `wrap(n)`, if any.
+fn map_placeholders(sql: &str, wrap: impl Fn(usize) -> Option<String>) -> String {
     let bytes = sql.as_bytes();
     let mut out = String::with_capacity(sql.len() + 32);
     let mut i = 0;
@@ -460,6 +495,11 @@ impl Session {
     /// Translates a statement, running a type probe first when its SQL has
     /// type-directed sites (see `localflake_sql::SiteTypes`).
     fn translate(&self, sql: &str) -> Result<Command, EngineError> {
+        self.translate_bound(sql, &[])
+    }
+
+    /// [`Self::translate`] for a statement with `binds`, which type its placeholders in the probe.
+    fn translate_bound(&self, sql: &str, binds: &[Bind]) -> Result<Command, EngineError> {
         let types = &self.ctx.types;
         types.probe();
         let command = localflake_sql::translate_statement(sql, &self.ctx);
@@ -467,14 +507,14 @@ impl Session {
             Ok(Command::Sql(probe)) if types.sites() > 0 => {
                 // Each prepare only types the innermost sites (see `probe`), so
                 // refine until every site has a type or a round learns nothing.
-                let mut known = probe::site_types(&self.conn, &probe.sql);
+                let mut known = probe::site_types(&self.conn, &probe_placeholders(&probe.sql, binds));
                 for _ in 0..8 {
                     types.refine(known.clone());
                     let Ok(Command::Sql(next)) = localflake_sql::translate_statement(sql, &self.ctx) else { break };
                     if types.unknown() == 0 {
                         break;
                     }
-                    let learned = probe::site_types(&self.conn, &next.sql);
+                    let learned = probe::site_types(&self.conn, &probe_placeholders(&next.sql, binds));
                     let before = known.len();
                     known.extend(learned);
                     if known.len() == before {
@@ -568,7 +608,7 @@ impl Session {
         } else {
             sql
         };
-        match self.translate(sql)? {
+        match self.translate_bound(sql, bindings.first().map(Vec::as_slice).unwrap_or_default())? {
             Command::Stage(command) => self.run_stage_command(command, query_id),
             Command::Use(target) => {
                 self.apply_use(target)?;
