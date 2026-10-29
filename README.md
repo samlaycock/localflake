@@ -65,12 +65,17 @@ through the engine's encoder into Snowflake's `rowtype`/`rowset` format.
 ```sh
 cargo test --workspace                              # unit tests and the conformance corpus, no server
 cargo build                                         # the end-to-end suites start target/debug/localflake
-(cd tests/python && uv run pytest)                  # official Python connector (Arrow, via Snowflake's Rust core)
-(cd tests/node && npm install && npm test)          # official Node.js driver (JSON)
-(cd tests/go && go test ./...)                      # gosnowflake (Arrow, its own decoder)
+(cd tests/python && uv run pytest)                  # official Python connector (Arrow and JSON)
+(cd tests/node && npm ci && npm test)               # official Node.js driver (JSON)
+(cd tests/go && go test ./...)                      # gosnowflake (Arrow and JSON)
 ```
 
 Set `LOCALFLAKE_BIN` to test a different binary.
+
+The three officially supported drivers share a conformance spec
+(`tests/conformance/cases.json`) that each suite runs through its driver, so
+they get the same coverage. `tests/README.md` describes the spec, the
+driver-specific tests and the known differences between the drivers.
 
 ### Conformance corpus
 
@@ -238,6 +243,9 @@ types known.
 - Logging in with an unknown database creates it, which suits tests. Run with
   `--missing-database ignore` to log in without a current database instead, as
   Snowflake does.
+- Result metadata reports precision 38 for `NUMBER(p,0)` columns, which are
+  stored as `BIGINT` (Snowflake reports the declared precision). Scales are
+  always right.
 - Timestamps have microsecond precision (Snowflake: nanosecond). TIMESTAMP_TZ
   offsets are kept in 15-minute steps.
 - When a statement inside a transaction fails, DuckDB aborts the transaction
