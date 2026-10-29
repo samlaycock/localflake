@@ -48,7 +48,8 @@ jobs:
           cache-dependency-path: tests/go/go.sum
       - name: Go driver
         working-directory: tests/go
-        run: go test ./...
+        # -count=1: Go caches test results, but not by the server binary under test.
+        run: go test -count=1 ./...
 
   docker:
     name: Docker build (no push)

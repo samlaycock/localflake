@@ -67,7 +67,7 @@ cargo test --workspace                              # unit tests and the conform
 cargo build                                         # the end-to-end suites start target/debug/localflake
 (cd tests/python && uv run pytest)                  # official Python connector (Arrow and JSON)
 (cd tests/node && npm ci && npm test)               # official Node.js driver (JSON)
-(cd tests/go && go test ./...)                      # gosnowflake (Arrow and JSON)
+(cd tests/go && go test -count=1 ./...)             # gosnowflake (Arrow and JSON)
 ```
 
 Set `LOCALFLAKE_BIN` to test a different binary.

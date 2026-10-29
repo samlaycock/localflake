@@ -13,7 +13,7 @@ integration suite that runs against a real localflake server:
 cargo build -p localflake-server            # the suites start target/debug/localflake
 (cd tests/python && uv run pytest)
 (cd tests/node && npm ci && npm test)
-(cd tests/go && go test ./...)
+(cd tests/go && go test -count=1 ./...)   # -count=1: results depend on the server binary
 ```
 
 Set `LOCALFLAKE_BIN` to test another binary.
