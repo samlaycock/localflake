@@ -207,11 +207,14 @@ differences between drivers.
   arguments, stored as DuckDB macros
 - DDL: `CREATE [OR REPLACE] [TRANSIENT] TABLE`, `CTAS`, `LIKE`, `CLONE`,
   `AUTOINCREMENT`/`IDENTITY`, comments, `ALTER TABLE ... ADD/DROP/RENAME
-  COLUMN`, `SWAP WITH`, views, sequences. Snowflake-only clauses (`CLUSTER BY`,
+  COLUMN`, `SWAP WITH`, views, materialized views, dynamic tables, `ALTER
+  [MATERIALIZED] VIEW | DYNAMIC TABLE` (rename, comments; refresh, suspend and
+  resume are accepted), sequences. Snowflake-only clauses (`CLUSTER BY`,
   `DATA_RETENTION_TIME_IN_DAYS`, ...) are accepted and ignored, and
   PRIMARY KEY/UNIQUE/FOREIGN KEY are not enforced (`NOT NULL` is)
-- Metadata: `SHOW DATABASES|SCHEMAS|TABLES|VIEWS|OBJECTS|COLUMNS|SEQUENCES|
-  PARAMETERS|...` and `DESCRIBE TABLE|VIEW|DATABASE|SCHEMA` with Snowflake's
+- Metadata: `SHOW DATABASES|SCHEMAS|TABLES|VIEWS|MATERIALIZED VIEWS|DYNAMIC
+  TABLES|OBJECTS|COLUMNS|SEQUENCES|PARAMETERS|...` and `DESCRIBE
+  TABLE|VIEW|DATABASE|SCHEMA` with Snowflake's
   column layout, `INFORMATION_SCHEMA.TABLES|COLUMNS|SCHEMATA|...`
 - Session: `ALTER SESSION SET/UNSET`, session variables (`SET x = ...`,
   `$x`), `CURRENT_DATABASE()` and friends
@@ -306,6 +309,12 @@ types known.
   dimensions are an error in both). gosnowflake can't decode `VECTOR` columns in
   Arrow results, so Go applications need JSON results
   (`GO_QUERY_RESULT_FORMAT = 'JSON'`) to read them.
+- Materialized views and dynamic tables are views, so they're always up to
+  date: a dynamic table never lags behind its sources, and `TARGET_LAG`,
+  `WAREHOUSE` and `REFRESH_MODE` are only recorded for `SHOW DYNAMIC TABLES`
+  (which reports `REFRESH_MODE = AUTO` as given, where Snowflake reports the
+  mode it chose). `SHOW TABLES`, `SHOW OBJECTS` and `INFORMATION_SCHEMA.TABLES`
+  list dynamic tables as tables.
 - Not implemented: JavaScript/Python/Java UDFs, stored procedures, Snowflake
   Scripting, time travel, streams and tasks.
 - No authentication, roles or access control.

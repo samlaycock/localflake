@@ -10,6 +10,8 @@ CREATE OR REPLACE TEMP MACRO sf_declared_type(c) AS
 CREATE OR REPLACE TEMP MACRO sf_user_comment(c) AS
     CASE WHEN starts_with(c, chr(57345)) THEN nullif(split_part(c, chr(57345), 3), '') ELSE c END;
 CREATE OR REPLACE TEMP MACRO sf_dename(x) AS replace(x, chr(57346), '');
+CREATE OR REPLACE TEMP MACRO sf_view_kind(c) AS split_part(coalesce(sf_declared_type(c), 'VIEW'), chr(57347), 1);
+CREATE OR REPLACE TEMP MACRO sf_view_option(c, n) AS nullif(split_part(sf_declared_type(c), chr(57347), n), '');
 CREATE OR REPLACE TEMP MACRO sf_columns() AS TABLE
     SELECT * REPLACE (coalesce(sf_declared_type(comment), data_type) AS data_type, sf_user_comment(comment) AS comment,
         sf_dename(database_name) AS database_name, sf_dename(schema_name) AS schema_name,
@@ -96,8 +98,10 @@ pub fn view(database: &str, view: &str) -> Option<String> {
              'NO' AS IS_ICEBERG, 'NO' AS IS_DYNAMIC, 'NO' AS IS_IMMUTABLE \
              FROM sf_tables() WHERE database_name = {db} AND schema_name NOT IN {hidden} \
              UNION ALL \
-             SELECT database_name, schema_name, view_name, 'ACCOUNTADMIN', 'VIEW', 'NO', NULL, NULL, NULL, NULL, \
-             current_timestamp, current_timestamp, current_timestamp, 'ACCOUNTADMIN', 'NO', comment, 'NO', 'NO', 'NO', 'NO' \
+             SELECT database_name, schema_name, view_name, 'ACCOUNTADMIN', \
+             CASE sf_view_kind(comment) WHEN 'DYNAMIC TABLE' THEN 'BASE TABLE' WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED VIEW' ELSE 'VIEW' END, \
+             'NO', NULL, NULL, NULL, NULL, current_timestamp, current_timestamp, current_timestamp, 'ACCOUNTADMIN', 'NO', \
+             sf_user_comment(comment), 'NO', 'NO', CASE WHEN sf_view_kind(comment) = 'DYNAMIC TABLE' THEN 'YES' ELSE 'NO' END, 'NO' \
              FROM sf_views() WHERE NOT internal AND database_name = {db} AND schema_name NOT IN {hidden}"
         ),
         "COLUMNS" => format!(
@@ -142,8 +146,9 @@ pub fn view(database: &str, view: &str) -> Option<String> {
             "SELECT database_name AS TABLE_CATALOG, schema_name AS TABLE_SCHEMA, view_name AS TABLE_NAME, \
              'ACCOUNTADMIN' AS TABLE_OWNER, sql AS VIEW_DEFINITION, 'NONE' AS CHECK_OPTION, 'NO' AS IS_UPDATABLE, \
              'NO' AS INSERTABLE_INTO, 'NO' AS IS_SECURE, current_timestamp AS CREATED, current_timestamp AS LAST_ALTERED, \
-             current_timestamp AS LAST_DDL, 'ACCOUNTADMIN' AS LAST_DDL_BY, comment AS COMMENT \
-             FROM sf_views() WHERE NOT internal AND database_name = {db} AND schema_name NOT IN {hidden}"
+             current_timestamp AS LAST_DDL, 'ACCOUNTADMIN' AS LAST_DDL_BY, sf_user_comment(comment) AS COMMENT \
+             FROM sf_views() WHERE NOT internal AND database_name = {db} AND schema_name NOT IN {hidden} \
+             AND sf_view_kind(comment) <> 'DYNAMIC TABLE'"
         ),
         "DATABASES" => {
             "SELECT database_name AS DATABASE_NAME, 'ACCOUNTADMIN' AS DATABASE_OWNER, 'NO' AS IS_TRANSIENT, \

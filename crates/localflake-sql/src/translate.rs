@@ -63,6 +63,15 @@ pub enum Command {
         name: String,
         if_exists: bool,
     },
+    /// `ALTER VIEW ... SET | UNSET COMMENT`: the engine replaces the view's
+    /// comment, keeping its kind marker (see `views`).
+    CommentOnView {
+        database: String,
+        schema: String,
+        view: String,
+        comment: Option<String>,
+        if_exists: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,7 +128,7 @@ impl InsertParts {
 }
 
 impl SqlCommand {
-    fn new(sql: impl Into<String>, kind: StatementKind) -> Self {
+    pub(crate) fn new(sql: impl Into<String>, kind: StatementKind) -> Self {
         Self {
             pre: vec![],
             sql: sql.into(),
@@ -132,7 +141,7 @@ impl SqlCommand {
         }
     }
 
-    fn with_status(mut self, status: impl Into<String>) -> Self {
+    pub(crate) fn with_status(mut self, status: impl Into<String>) -> Self {
         self.status = Some(status.into());
         self
     }
@@ -224,6 +233,9 @@ pub fn translate_statement(sql: &str, ctx: &Context) -> Result<Command, SqlError
         });
     }
     if let Some(command) = account_level(sql)? {
+        return Ok(command);
+    }
+    if let Some(command) = crate::views::parse(sql, ctx)? {
         return Ok(command);
     }
 
@@ -332,6 +344,11 @@ fn translate_parsed(statement: Statement, ctx: &Context) -> Result<Command, SqlE
         }
         Statement::Drop { object_type: ObjectType::Schema, names, if_exists, .. } => {
             let sql = format!("DROP SCHEMA {}{} CASCADE", if *if_exists { "IF EXISTS " } else { "" }, names[0]);
+            let status = format!("{} successfully dropped.", last_part(&names[0]));
+            return Ok(Command::Sql(SqlCommand::new(sql, StatementKind::Ddl).with_status(status)));
+        }
+        Statement::Drop { object_type: ObjectType::MaterializedView, names, if_exists, .. } => {
+            let sql = format!("DROP VIEW {}{}", if *if_exists { "IF EXISTS " } else { "" }, names[0]);
             let status = format!("{} successfully dropped.", last_part(&names[0]));
             return Ok(Command::Sql(SqlCommand::new(sql, StatementKind::Ddl).with_status(status)));
         }
@@ -697,6 +714,9 @@ fn translate_set(set: &Set, ctx: &Context) -> Result<Command, SqlError> {
 
 fn render_create_table(statement: Statement, ctx: &Context) -> Result<SqlCommand, SqlError> {
     let Statement::CreateTable(ct) = statement else { unreachable!() };
+    if ct.dynamic {
+        return render_create_dynamic_table(&ct);
+    }
     let table_name = last_part(&ct.name);
     let temporary = ct.temporary || ct.volatile;
     // DuckDB temp tables live in their own catalog and can't be qualified.
@@ -831,7 +851,7 @@ fn render_column_with(
 }
 
 /// Separates the declared type from the user's comment in a column comment.
-const COMMENT_MARKER: char = '\u{E001}';
+pub(crate) const COMMENT_MARKER: char = '\u{E001}';
 
 /// The DuckDB comment for a column: its declared Snowflake type when DuckDB
 /// can't represent it (see [`declared_type`]), then the user's comment.
@@ -875,11 +895,34 @@ fn sequence_name(table: &ObjectName, column: &str, ctx: &Context) -> Result<Stri
     Ok(format!("{}.{}.{}", quote(&db), quote(&schema), quote(&format!("{table}_{column}_SEQ"))))
 }
 
+/// `CREATE DYNAMIC TABLE ... AS <query>`: a view (see `views`).
+fn render_create_dynamic_table(ct: &sqlparser::ast::CreateTable) -> Result<SqlCommand, SqlError> {
+    let query = ct.query.as_ref().ok_or_else(|| SqlError::Unsupported("CREATE DYNAMIC TABLE without AS".into()))?;
+    let columns = if ct.columns.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", ct.columns.iter().map(|c| c.name.to_string()).collect::<Vec<_>>().join(", "))
+    };
+    let name = ct.name.to_string();
+    let sql = format!(
+        "CREATE {}VIEW {}{name}{columns} AS {query}",
+        if ct.or_replace { "OR REPLACE " } else { "" },
+        if ct.if_not_exists { "IF NOT EXISTS " } else { "" },
+    );
+    let target_lag = ct.target_lag.as_deref().unwrap_or("DOWNSTREAM").trim_matches('\'');
+    let warehouse = ct.warehouse.as_ref().map(|w| w.value.clone()).unwrap_or_default();
+    let refresh_mode = ct.refresh_mode.as_ref().map_or("AUTO".to_owned(), ToString::to_string);
+    let kind = crate::views::ViewKind::Dynamic { target_lag, warehouse: &warehouse, refresh_mode: &refresh_mode };
+    let comment = table_comment(ct);
+    let mut command = SqlCommand::new(sql, StatementKind::Ddl)
+        .with_status(format!("Dynamic table {} successfully created.", last_part(&ct.name)));
+    let comment = crate::views::view_comment(&kind, comment.as_deref());
+    command.post.push(format!("COMMENT ON VIEW {name} IS {}", quote_literal(&comment)));
+    Ok(command)
+}
+
 fn render_create_view(statement: Statement) -> Result<SqlCommand, SqlError> {
     let Statement::CreateView(view) = statement else { unreachable!() };
-    if view.materialized {
-        return Err(SqlError::Unsupported("materialized views".into()));
-    }
     let columns = if view.columns.is_empty() {
         String::new()
     } else {
@@ -893,10 +936,19 @@ fn render_create_view(statement: Statement) -> Result<SqlCommand, SqlError> {
         if view.if_not_exists { "IF NOT EXISTS " } else { "" },
         view.query
     );
-    let status = format!("View {} successfully created.", last_part(&view.name));
+    let status = if view.materialized {
+        format!("Materialized view {} successfully created.", last_part(&view.name))
+    } else {
+        format!("View {} successfully created.", last_part(&view.name))
+    };
     let mut command = SqlCommand::new(sql, StatementKind::Ddl).with_status(status);
-    if let Some(comment) = &view.comment {
-        command.post.push(format!("COMMENT ON VIEW {name} IS {}", quote_literal(comment)));
+    // Materialized views are views, marked as materialized in their comment (see `views`).
+    let comment = match view.materialized {
+        true => Some(crate::views::view_comment(&crate::views::ViewKind::Materialized, view.comment.as_deref())),
+        false => view.comment.clone(),
+    };
+    if let Some(comment) = comment {
+        command.post.push(format!("COMMENT ON VIEW {name} IS {}", quote_literal(&comment)));
     }
     Ok(command)
 }

@@ -25,6 +25,7 @@ mod types;
 mod typing;
 mod udf;
 mod variant;
+mod views;
 
 pub use context::{Context, DEFAULT_PARAMETERS, TimestampMapping};
 pub use meta::{Scope, Show};
@@ -32,6 +33,7 @@ pub use normalize::{CASE_MARKER, decode_identifier, encode_identifier, normalize
 pub use rewrite::result_table;
 pub use translate::{Command, InsertParts, SqlCommand, StatementKind, UseTarget, split, translate_statement};
 pub use typing::SiteTypes;
+pub use views::replace_user_comment;
 
 /// SQL macros the translated SQL depends on.
 pub fn macros() -> String {
