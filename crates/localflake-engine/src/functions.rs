@@ -46,6 +46,7 @@ pub fn register(conn: &Connection) -> duckdb::Result<()> {
     conn.register_scalar_function::<TzInZone>("sf_tz_in_zone")?;
     conn.register_scalar_function::<TzRewrap>("sf_tz_rewrap")?;
     conn.register_scalar_function::<TzInstant>("sf_tz_instant")?;
+    conn.register_scalar_function::<Cbrt>("sf_cbrt")?;
     conn.register_scalar_function::<RegexpReplace>("sf_regexp_replace")?;
     conn.register_scalar_function::<crate::match_recognize::MatchRecognize>("sf_match_recognize")?;
     conn.register_scalar_function::<Decompress>("sf_decompress")?;
@@ -1015,6 +1016,23 @@ impl VArrowScalar for Decompress {
 
     fn signatures() -> Vec<ArrowFunctionSignature> {
         vec![ArrowFunctionSignature::exact(vec![DataType::Binary, DataType::Utf8], DataType::Binary)]
+    }
+}
+
+/// `sf_cbrt(x)`: the cube root, exact for perfect cubes.
+struct Cbrt;
+
+impl VArrowScalar for Cbrt {
+    type State = ();
+
+    fn invoke(_: &(), input: RecordBatch) -> Result<ArrayRef> {
+        let values = input.column(0).as_primitive::<Float64Type>();
+        let out: Float64Array = values.iter().map(|v| v.map(f64::cbrt)).collect();
+        Ok(Arc::new(out))
+    }
+
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(vec![DataType::Float64], DataType::Float64)]
     }
 }
 

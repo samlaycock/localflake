@@ -411,6 +411,9 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
 
         // Numbers.
         "SQUARE" => func("power", vec![arg(0)?, number(2)]),
+        // Rust's correctly rounded cbrt: DuckDB's depends on how it was built
+        // (the prebuilt library gives 3.0000000000000004 for 27).
+        "CBRT" => func("sf_cbrt", vec![cast(arg(0)?, DataType::Double(ExactNumberInfo::None))]),
         "WIDTH_BUCKET" => func("sf_width_bucket", vec![arg(0)?, arg(1)?, arg(2)?, arg(3)?]),
         "HAVERSINE" => func("sf_haversine", vec![arg(0)?, arg(1)?, arg(2)?, arg(3)?]),
         "BOOLAND" | "BOOLOR" => {
