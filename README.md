@@ -72,6 +72,17 @@ cargo build                                         # the end-to-end suites star
 
 Set `LOCALFLAKE_BIN` to test a different binary.
 
+Builds compile DuckDB from source by default (the engine's `bundled` feature),
+which takes several minutes. To link DuckDB's prebuilt library instead, as CI
+and the Docker image do, build without default features; the library for the
+pinned release is downloaded automatically, and the rpath tells binaries where
+to find it:
+
+```sh
+LIB=$PWD/target/duckdb-download/$(rustc -vV | sed -n 's/host: //p')/v2.0.0
+RUSTFLAGS="-C link-arg=-Wl,-rpath,$LIB" cargo test --workspace --no-default-features
+```
+
 The three officially supported drivers share a conformance spec
 (`tests/conformance/cases.json`) that each suite runs through its driver, so
 they get the same coverage. `tests/README.md` describes the spec, the

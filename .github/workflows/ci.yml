@@ -24,10 +24,26 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the cache even when a check fails, so the next run starts warm.
+          cache-on-failure: true
+      # Link DuckDB's prebuilt library (the release localflake-engine/build.rs
+      # pins) instead of compiling it from source, which takes ~8 minutes.
+      - name: Fetch DuckDB's prebuilt library
+        run: |
+          version=$(sed -n 's/^const DUCKDB_VERSION: &str = "\(.*\)";$/\1/p' crates/localflake-engine/build.rs)
+          dir="$RUNNER_TEMP/libduckdb"
+          mkdir -p "$dir"
+          curl -fsSL "https://install.duckdb.org/$version/duckdb-shared-libs-linux-amd64.tar.gz" | tar -xz -C "$dir"
+          {
+            echo "DUCKDB_LIB_DIR=$dir"
+            echo "DUCKDB_DOWNLOAD_LIB=0"
+            echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,$dir"
+          } >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo build -p localflake-server
+      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      - run: cargo test --workspace --no-default-features
+      - run: cargo build -p localflake-server --no-default-features
 
       # End-to-end tests with the official drivers, against target/debug/localflake.
       - uses: astral-sh/setup-uv@v6

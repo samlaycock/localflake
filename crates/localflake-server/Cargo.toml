@@ -8,6 +8,10 @@ license.workspace = true
 name = "localflake"
 path = "src/main.rs"
 
+[features]
+default = ["bundled"]
+bundled = ["localflake-engine/bundled"]
+
 [dependencies]
 localflake-engine.workspace = true
 anyhow.workspace = true
