@@ -77,3 +77,34 @@ select column_name, data_type from information_schema.columns where table_name =
 ----
 ID|NUMBER
 AT|TIMESTAMP_TZ
+
+# TO_VARCHAR / TO_CHAR with a format: local time at the value's own offset.
+query
+select to_varchar('2026-01-01 12:00:00 +05:30'::timestamp_tz, 'TZH:TZM'), to_varchar('2026-01-01 12:00:00 +05:30'::timestamp_tz, 'TZHTZM'), to_varchar('2026-01-01 12:00:00 +05:30'::timestamp_tz, 'TZH'), to_varchar('2026-01-01 12:00:00 +05:30'::timestamp_tz, 'TZM')
+----
++05:30|+0530|+05|30
+
+query
+select to_varchar('2026-01-01 12:00:00 +05:30'::timestamp_tz, 'YYYY-MM-DD HH24:MI'), to_char('2026-01-01 12:00:00 -08:00'::timestamp_tz, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZH:TZM')
+----
+2026-01-01 12:00|2026-01-01T12:00:00.000-08:00
+
+statement ok
+create or replace table tz_fmt (ts timestamp_tz)
+
+statement ok
+insert into tz_fmt values ('2026-01-01 12:00:00 +05:30')
+
+statement ok
+insert into tz_fmt select value:TS::varchar::timestamp_tz from table(flatten(input => parse_json('[{"TS":"2026-01-01T12:00:00.000+00:00"}]')))
+
+query rowsort
+select to_varchar(ts, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZH:TZM') from tz_fmt
+----
+2026-01-01T12:00:00.000+00:00
+2026-01-01T12:00:00.000+05:30
+
+query
+select to_varchar('2024-01-01 00:00:00 +00:00'::timestamp_ltz, 'YYYY-MM-DD HH24:MI TZH:TZM')
+----
+2023-12-31 16:00 -08:00
