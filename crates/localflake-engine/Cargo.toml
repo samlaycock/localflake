@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Compile DuckDB from source. Without it, DuckDB's prebuilt shared library is
+# linked: from DUCKDB_LIB_DIR, or downloaded for the pinned release.
+default = ["bundled"]
+bundled = ["duckdb/bundled", "duckdb/json"]
+
 [dependencies]
 localflake-sql.workspace = true
 arrow-array.workspace = true

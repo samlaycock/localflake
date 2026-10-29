@@ -9,7 +9,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 localflake-sql = { path = "crates/localflake-sql" }
-localflake-engine = { path = "crates/localflake-engine" }
+localflake-engine = { path = "crates/localflake-engine", default-features = false }
 
 anyhow = "1"
 axum = "0.8"
@@ -19,7 +19,9 @@ arrow-ipc = "60"
 base64 = "0.23"
 chrono = "0.4"
 chrono-tz = "0.10"
-duckdb = { version = "1.20000", features = ["bundled", "json", "vscalar", "vscalar-arrow", "appender-arrow"] }
+# `bundled` (DuckDB compiled from source) is a feature of localflake-engine:
+# CI and Docker link against DuckDB's prebuilt library instead.
+duckdb = { version = "1.20000", features = ["vscalar", "vscalar-arrow", "appender-arrow"] }
 flate2 = "1"
 md5 = { package = "md-5", version = "0.11" }
 sha2 = "0.11"
