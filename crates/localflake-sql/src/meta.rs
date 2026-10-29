@@ -53,10 +53,16 @@ pub fn parse(sql: &str) -> Result<Option<Meta>, SqlError> {
         Some("DESC" | "DESCRIBE") => {
             let mut kind = "TABLE".to_owned();
             if let Some(w) = p.peek_word()
-                && matches!(w.as_str(), "TABLE" | "VIEW" | "DATABASE" | "SCHEMA" | "MATERIALIZED" | "EXTERNAL")
+                && matches!(
+                    w.as_str(),
+                    "TABLE" | "VIEW" | "DATABASE" | "SCHEMA" | "MATERIALIZED" | "EXTERNAL" | "DYNAMIC"
+                )
             {
                 p.pos += 1;
-                kind = if w == "MATERIALIZED" || w == "EXTERNAL" { p.word().unwrap_or_default() } else { w };
+                kind = match w.as_str() {
+                    "MATERIALIZED" | "EXTERNAL" | "DYNAMIC" => p.word().unwrap_or_default(),
+                    _ => w,
+                };
             }
             let name =
                 p.object_name().ok_or_else(|| SqlError::Unsupported("DESCRIBE without an object name".into()))?;
@@ -269,7 +275,7 @@ pub fn show_sql(show: &Show, ctx: &Context) -> Result<String, SqlError> {
             "SCHEMA",
         ),
         "TABLES" | "TRANSIENT TABLES" | "HYBRID TABLES" => (
-            tables_source(),
+            format!("{} UNION ALL BY NAME {}", tables_source(), dynamic_tables_source()),
             cols(&[
                 created,
                 "name",
@@ -294,7 +300,7 @@ pub fn show_sql(show: &Show, ctx: &Context) -> Result<String, SqlError> {
                 "CAST(NULL AS VARCHAR) AS budget",
                 "'N' AS is_hybrid",
                 "'N' AS is_iceberg",
-                "'N' AS is_dynamic",
+                "is_dynamic",
                 "'N' AS is_immutable",
             ]),
             "TABLE",
@@ -311,14 +317,14 @@ pub fn show_sql(show: &Show, ctx: &Context) -> Result<String, SqlError> {
                 "coalesce(comment, '') AS comment",
                 "text",
                 "'false' AS is_secure",
-                "'false' AS is_materialized",
+                "CASE WHEN kind = 'MATERIALIZED_VIEW' THEN 'true' ELSE 'false' END AS is_materialized",
                 "'ROLE' AS owner_role_type",
                 "'OFF' AS change_tracking",
             ]),
             "VIEW",
         ),
         "OBJECTS" => (
-            format!("{} UNION ALL {}", tables_source(), views_source()),
+            format!("{} UNION ALL {} UNION ALL BY NAME {}", tables_source(), views_source(), dynamic_tables_source()),
             cols(&[
                 created,
                 "name",
@@ -334,10 +340,70 @@ pub fn show_sql(show: &Show, ctx: &Context) -> Result<String, SqlError> {
                 "'ROLE' AS owner_role_type",
                 "CAST(NULL AS VARCHAR) AS budget",
                 "'N' AS is_hybrid",
-                "'N' AS is_dynamic",
+                "is_dynamic",
                 "'N' AS is_iceberg",
             ]),
             "",
+        ),
+        "MATERIALIZED VIEWS" => (
+            format!("SELECT * FROM ({}) WHERE kind = 'MATERIALIZED_VIEW'", views_source()),
+            cols(&[
+                created,
+                "name",
+                "'' AS reserved",
+                "database_name",
+                "schema_name",
+                "'' AS cluster_by",
+                "CAST(0 AS BIGINT) AS \"rows\"",
+                "CAST(0 AS BIGINT) AS bytes",
+                "CAST(NULL AS VARCHAR) AS source_database_name",
+                "CAST(NULL AS VARCHAR) AS source_schema_name",
+                "CAST(NULL AS VARCHAR) AS source_table_name",
+                "current_timestamp AS refreshed_on",
+                "current_timestamp AS compacted_on",
+                "'ACCOUNTADMIN' AS owner",
+                "'false' AS invalid",
+                "'' AS invalid_reason",
+                "'0s' AS behind_by",
+                "coalesce(comment, '') AS comment",
+                "text",
+                "'false' AS is_secure",
+                "'OFF' AS automatic_clustering",
+                "'ROLE' AS owner_role_type",
+                "CAST(NULL AS VARCHAR) AS budget",
+            ]),
+            "MATERIALIZED_VIEW",
+        ),
+        // Dynamic tables are views, so they're always up to date (see `views::create_dynamic_table`).
+        "DYNAMIC TABLES" => (
+            dynamic_tables_source(),
+            cols(&[
+                created,
+                "name",
+                "'' AS reserved",
+                "database_name",
+                "schema_name",
+                "'' AS cluster_by",
+                "CAST(0 AS BIGINT) AS \"rows\"",
+                "CAST(0 AS BIGINT) AS bytes",
+                "'ACCOUNTADMIN' AS owner",
+                "target_lag",
+                "refresh_mode",
+                "CAST(NULL AS VARCHAR) AS refresh_mode_reason",
+                "warehouse",
+                "coalesce(comment, '') AS comment",
+                "text",
+                "'OFF' AS automatic_clustering",
+                "'RUNNING' AS scheduling_state",
+                "CAST(NULL AS TIMESTAMP WITH TIME ZONE) AS last_suspended_on",
+                "'false' AS is_clone",
+                "'false' AS is_replica",
+                "'false' AS is_iceberg",
+                "current_timestamp AS data_timestamp",
+                "'ROLE' AS owner_role_type",
+                "CAST(NULL AS VARCHAR) AS budget",
+            ]),
+            "TABLE",
         ),
         "COLUMNS" => (
             format!(
@@ -512,15 +578,30 @@ pub fn show_sql(show: &Show, ctx: &Context) -> Result<String, SqlError> {
 fn tables_source() -> String {
     format!(
         "SELECT table_name AS name, database_name, schema_name, CASE WHEN temporary THEN 'TEMPORARY' ELSE 'TABLE' END AS kind, \
-         comment, CAST(estimated_size AS BIGINT) AS \"rows\", CAST(NULL AS VARCHAR) AS text FROM sf_tables() \
+         comment, CAST(estimated_size AS BIGINT) AS \"rows\", CAST(NULL AS VARCHAR) AS text, 'N' AS is_dynamic FROM sf_tables() \
          WHERE database_name NOT IN ('temp', 'system') AND schema_name NOT IN {HIDDEN_SCHEMAS}"
     )
 }
 
+/// Views and materialized views (both DuckDB views; see `views`).
 fn views_source() -> String {
     format!(
-        "SELECT view_name AS name, database_name, schema_name, 'VIEW' AS kind, comment, CAST(NULL AS BIGINT) AS \"rows\", sql AS text \
-         FROM sf_views() WHERE NOT internal AND database_name NOT IN ('temp', 'system') AND schema_name NOT IN {HIDDEN_SCHEMAS}"
+        "SELECT view_name AS name, database_name, schema_name, \
+         CASE WHEN sf_view_kind(comment) = 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE 'VIEW' END AS kind, \
+         sf_user_comment(comment) AS comment, CAST(NULL AS BIGINT) AS \"rows\", sql AS text, 'N' AS is_dynamic \
+         FROM sf_views() WHERE NOT internal AND database_name NOT IN ('temp', 'system') AND schema_name NOT IN {HIDDEN_SCHEMAS} \
+         AND sf_view_kind(comment) <> 'DYNAMIC TABLE'"
+    )
+}
+
+/// Dynamic tables, which are DuckDB views (see `views`), as tables.
+fn dynamic_tables_source() -> String {
+    format!(
+        "SELECT view_name AS name, database_name, schema_name, 'TABLE' AS kind, sf_user_comment(comment) AS comment, \
+         CAST(NULL AS BIGINT) AS \"rows\", sql AS text, 'Y' AS is_dynamic, sf_view_option(comment, 2) AS target_lag, \
+         sf_view_option(comment, 3) AS warehouse, sf_view_option(comment, 4) AS refresh_mode \
+         FROM sf_views() WHERE NOT internal AND database_name NOT IN ('temp', 'system') AND schema_name NOT IN {HIDDEN_SCHEMAS} \
+         AND sf_view_kind(comment) = 'DYNAMIC TABLE'"
     )
 }
 

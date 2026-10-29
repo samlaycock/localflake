@@ -1,0 +1,198 @@
+# Materialized views, dynamic tables and ALTER VIEW. Both kinds are views in
+# localflake, so they're always up to date (as a materialized view is in Snowflake).
+
+statement ok
+create table src (id int, v int)
+
+statement ok
+insert into src values (1, 10), (2, 20)
+
+statement ok
+create or replace materialized view mv comment = 'totals' as select sum(v) as total from src
+
+query
+select total from mv
+----
+30
+
+statement ok
+insert into src values (3, 30)
+
+query
+select total from mv
+----
+60
+
+statement ok
+create or replace dynamic table dt target_lag = '1 minute' warehouse = wh refresh_mode = full as select id, v * 2 as doubled from src
+
+query rowsort
+select * from dt
+----
+1|20
+2|40
+3|60
+
+statement ok
+show dynamic tables like 'DT'
+
+query
+select "name", "target_lag", "warehouse", "refresh_mode", "comment" from table(result_scan(last_query_id()))
+----
+DT|1 minute|WH|FULL|(empty)
+
+statement ok
+show tables
+
+query rowsort
+select "name", "is_dynamic" from table(result_scan(last_query_id()))
+----
+DT|Y
+SRC|N
+
+statement ok
+show objects
+
+query rowsort
+select "name", "kind", "is_dynamic" from table(result_scan(last_query_id()))
+----
+DT|TABLE|Y
+MV|MATERIALIZED_VIEW|N
+SRC|TABLE|N
+
+statement ok
+show views
+
+query
+select "name", "is_materialized", "comment" from table(result_scan(last_query_id()))
+----
+MV|true|totals
+
+statement ok
+show materialized views
+
+query
+select "name", "comment" from table(result_scan(last_query_id()))
+----
+MV|totals
+
+query rowsort
+select table_name, table_type, is_dynamic from information_schema.tables
+----
+DT|BASE TABLE|YES
+MV|MATERIALIZED VIEW|NO
+SRC|BASE TABLE|NO
+
+statement ok
+alter materialized view mv set comment = 'sums'
+
+statement ok
+alter materialized view mv suspend
+
+statement ok
+alter materialized view mv rename to mv2
+
+statement ok
+show materialized views
+
+query
+select "name", "comment" from table(result_scan(last_query_id()))
+----
+MV2|sums
+
+statement ok
+alter dynamic table dt refresh
+
+statement ok
+alter dynamic table dt suspend
+
+statement ok
+alter dynamic table dt set comment = 'doubled'
+
+statement ok
+show dynamic tables
+
+query
+select "name", "target_lag", "comment" from table(result_scan(last_query_id()))
+----
+DT|1 minute|doubled
+
+statement ok
+create view pv as select id from src
+
+statement ok
+alter view pv set comment = 'plain'
+
+statement ok
+alter view pv set secure
+
+statement ok
+alter view pv rename to pv2
+
+query
+select count(*) from pv2
+----
+3
+
+statement ok
+show views like 'PV2'
+
+query
+select "name", "is_materialized", "comment" from table(result_scan(last_query_id()))
+----
+PV2|false|plain
+
+statement ok
+alter view pv2 unset comment
+
+statement ok
+show views like 'PV2'
+
+query
+select "comment" from table(result_scan(last_query_id()))
+----
+(empty)
+
+statement ok
+alter view if exists missing set secure
+
+error 002003
+alter view missing set secure
+
+error 002003
+alter view missing set comment = 'x'
+
+statement ok
+desc dynamic table dt
+
+query
+select "name", "type" from table(result_scan(last_query_id()))
+----
+ID|NUMBER(38,0)
+DOUBLED|NUMBER(38,0)
+
+statement ok
+desc materialized view mv2
+
+query
+select "name", "type" from table(result_scan(last_query_id()))
+----
+TOTAL|NUMBER(38,0)
+
+statement ok
+drop dynamic table dt
+
+statement ok
+drop dynamic table if exists dt
+
+statement ok
+drop materialized view mv2
+
+statement ok
+show objects
+
+query rowsort
+select "name" from table(result_scan(last_query_id()))
+----
+PV2
+SRC

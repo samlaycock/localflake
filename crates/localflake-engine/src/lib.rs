@@ -755,6 +755,27 @@ impl Session {
                 }
                 Ok(QueryResult::status(id(), &format!("{bare} successfully dropped."), StatementKind::Ddl))
             }
+            Command::CommentOnView { database, schema, view, comment, if_exists } => {
+                let existing: Option<Option<String>> = self
+                    .conn
+                    .query_row(
+                        "SELECT comment FROM duckdb_views() WHERE database_name = ? AND schema_name = ? AND view_name = ?",
+                        [&database, &schema, &view],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let Some(existing) = existing else {
+                    if if_exists {
+                        return ok();
+                    }
+                    return Err(EngineError::does_not_exist("View", &localflake_sql::decode_identifier(&view)));
+                };
+                let comment = localflake_sql::replace_user_comment(existing.as_deref(), comment.as_deref());
+                let comment = comment.as_deref().map_or("NULL".to_owned(), literal);
+                let name = format!("{}.{}.{}", ident(&database), ident(&schema), ident(&view));
+                self.conn.execute_batch(&format!("COMMENT ON VIEW {name} IS {comment}"))?;
+                ok()
+            }
             Command::MultiInsert { setup, clear, inserts } => {
                 let labels: Vec<String> =
                     inserts.iter().map(|(table, _)| format!("number of rows inserted into {table}")).collect();
