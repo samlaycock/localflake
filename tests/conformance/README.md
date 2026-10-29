@@ -51,7 +51,7 @@ A step with no expectations only has to succeed.
 
 Types are Snowflake's: `FIXED(p,s)`, `REAL`, `TEXT`, `BOOLEAN`, `DATE`, `TIME`,
 `TIMESTAMP_NTZ`, `TIMESTAMP_LTZ`, `TIMESTAMP_TZ`, `BINARY`, `VARIANT`,
-`OBJECT`, `ARRAY`. Runners convert each driver's native value, using the
+`OBJECT`, `ARRAY`, `VECTOR`. Runners convert each driver's native value, using the
 column's type, to:
 
 | Type | Canonical value |
@@ -68,6 +68,7 @@ column's type, to:
 | `TIMESTAMP_TZ` | wall time and offset: `"2024-03-15 10:11:12+02:00"` |
 | `BINARY` | lower-case hex: `"6162"` |
 | `VARIANT`, `OBJECT`, `ARRAY` | compact JSON text with sorted keys: `"{\"a\":[1,2]}"`; JSON null is `"null"` |
+| `VECTOR` | compact JSON array of the elements: `"[0.5,-2.5]"` |
 
 Bind values are `{"type": "<TYPE>", "value": <canonical value>}` (or
 `{"type": "NULL"}`); each runner binds the driver's native type for it.

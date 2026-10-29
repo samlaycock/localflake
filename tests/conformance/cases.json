@@ -573,6 +573,43 @@
       ]
     },
     {
+      "name": "types/vector",
+      "skip": {
+        "go/ARROW": "gosnowflake can't decode VECTOR columns in Arrow results (unsupported data type)"
+      },
+      "steps": [
+        {
+          "sql": "select [1, 2, 3]::vector(int, 3) as i, [0.5, -2.5, 1.25]::vector(float, 3) as f, null::vector(float, 2) as n, vector_inner_product([1, 2]::vector(int, 2), [3, 4]::vector(int, 2)) as dot",
+          "columns": [
+            [
+              "I",
+              "VECTOR"
+            ],
+            [
+              "F",
+              "VECTOR"
+            ],
+            [
+              "N",
+              "VECTOR"
+            ],
+            [
+              "DOT",
+              "REAL"
+            ]
+          ],
+          "rows": [
+            [
+              "[1,2,3]",
+              "[0.5,-2.5,1.25]",
+              null,
+              11
+            ]
+          ]
+        }
+      ]
+    },
+    {
       "name": "types/table-columns",
       "steps": [
         {

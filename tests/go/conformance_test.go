@@ -453,7 +453,7 @@ func canonical(v any, typ string) (any, error) {
 			return nil, fmt.Errorf("unexpected BINARY value %T", v)
 		}
 		return fmt.Sprintf("%x", b), nil
-	case "VARIANT", "OBJECT", "ARRAY":
+	case "VARIANT", "OBJECT", "ARRAY", "VECTOR":
 		text, ok := v.(string)
 		if !ok {
 			return nil, fmt.Errorf("unexpected %s value %T", base, v)

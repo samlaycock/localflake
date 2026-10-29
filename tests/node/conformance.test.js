@@ -261,6 +261,7 @@ function canonical(value, type) {
     case "VARIANT":
     case "OBJECT":
     case "ARRAY":
+    case "VECTOR":
       return stableJson(typeof value === "string" ? JSON.parse(value) : value);
     default:
       return value;

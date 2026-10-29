@@ -13,10 +13,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine as _;
-use duckdb::arrow::array::{Array, ArrayRef, AsArray, Int32Array, Int64Array, RecordBatch, StringArray, StructArray};
+use duckdb::arrow::array::{
+    Array, ArrayRef, AsArray, FixedSizeListArray, Int32Array, Int64Array, RecordBatch, StringArray, StructArray,
+};
 use duckdb::arrow::compute::cast;
 use duckdb::arrow::datatypes::{
-    DataType, Decimal128Type, Field, Fields, Int32Type, Schema, Time64MicrosecondType, TimeUnit,
+    DataType, Decimal128Type, Field, Fields, Float32Type, Int32Type, Schema, Time64MicrosecondType, TimeUnit,
     TimestampMicrosecondType,
 };
 use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
@@ -45,6 +47,8 @@ pub enum SfType {
     Variant,
     Object,
     Array,
+    /// `VECTOR(INT, n)` or `VECTOR(FLOAT, n)`; see `Column::vector`.
+    Vector,
 }
 
 impl SfType {
@@ -64,6 +68,7 @@ impl SfType {
             Self::Variant => "variant",
             Self::Object => "object",
             Self::Array => "array",
+            Self::Vector => "vector",
         }
     }
 
@@ -80,6 +85,8 @@ pub struct Column {
     pub scale: Option<i8>,
     pub length: Option<u64>,
     pub nullable: bool,
+    /// For VECTOR columns: the element type (`Fixed` or `Real`) and the dimension.
+    pub vector: Option<(SfType, i32)>,
 }
 
 impl Column {
@@ -93,7 +100,7 @@ impl Column {
             SfType::Binary => (None, None, Some(MAX_BINARY_LENGTH)),
             _ => (None, None, None),
         };
-        Self { name: name.to_owned(), sf_type, precision, scale, length, nullable }
+        Self { name: name.to_owned(), sf_type, precision, scale, length, nullable, vector: None }
     }
 
     /// Derives Snowflake metadata from an Arrow field. `semi` marks columns that
@@ -127,6 +134,13 @@ impl Column {
             DataType::Timestamp(_, Some(_)) => Self::new(name, SfType::TimestampLtz, nullable),
             DataType::Binary | DataType::LargeBinary | DataType::BinaryView | DataType::FixedSizeBinary(_) => {
                 Self::new(name, SfType::Binary, nullable)
+            }
+            // VECTOR storage (see localflake_sql's type mapping).
+            DataType::FixedSizeList(item, dimension)
+                if matches!(item.data_type(), DataType::Int32 | DataType::Float32) =>
+            {
+                let element = if item.data_type() == &DataType::Int32 { SfType::Fixed } else { SfType::Real };
+                Self { vector: Some((element, *dimension)), ..Self::new(name, SfType::Vector, nullable) }
             }
             _ => Self::new(name, SfType::Text, nullable),
         }
@@ -256,6 +270,22 @@ fn json_column(array: &ArrayRef, column: &Column) -> Result<Vec<Option<String>>,
             let text = cast(array, &DataType::Utf8)?;
             text.as_string::<i32>().iter().map(|s| s.map(pretty_json).unwrap_or_default()).collect()
         }
+        // A JSON array of the elements, floats in their shortest form: `[1.5,-2,3]`.
+        SfType::Vector => {
+            let vectors = array.as_fixed_size_list();
+            let values = vectors.values();
+            let element = |j: usize| match values.data_type() {
+                DataType::Float32 => values.as_primitive::<Float32Type>().value(j).to_string(),
+                _ => values.as_primitive::<Int32Type>().value(j).to_string(),
+            };
+            let dimension = vectors.value_length() as usize;
+            (0..array.len())
+                .map(|i| {
+                    let elements: Vec<String> = (i * dimension..(i + 1) * dimension).map(element).collect();
+                    format!("[{}]", elements.join(","))
+                })
+                .collect()
+        }
         SfType::Text => {
             let formatter = ArrayFormatter::try_new(array.as_ref(), &FormatOptions::default())?;
             // Catalog names surface as text (SHOW, CURRENT_SCHEMA(), ...); decode them.
@@ -289,6 +319,7 @@ fn arrow_field(column: &Column, array: &ArrayRef) -> Field {
         SfType::TimestampNtz | SfType::TimestampLtz => (DataType::Struct(timestamp_fields()), "SB16"),
         SfType::TimestampTz => (DataType::Struct(timestamp_tz_fields()), "SB16"),
         SfType::Binary => (DataType::Binary, "BINARY"),
+        SfType::Vector => (vector_type(column), "VECTOR"),
         _ => (DataType::Utf8, "LOB"),
     };
     let mut metadata = HashMap::from([
@@ -347,6 +378,12 @@ fn arrow_column(array: &ArrayRef, column: &Column) -> Result<ArrayRef, EngineErr
             let text = cast(array, &DataType::Utf8)?;
             Arc::new(StringArray::from_iter(text.as_string::<i32>().iter().map(|s| s.map(pretty_json))))
         }
+        // Rebuilt so the element field matches `vector_type`.
+        SfType::Vector => {
+            let vectors = array.as_fixed_size_list();
+            let DataType::FixedSizeList(item, dimension) = vector_type(column) else { unreachable!() };
+            Arc::new(FixedSizeListArray::try_new(item, dimension, vectors.values().clone(), vectors.nulls().cloned())?)
+        }
         SfType::Text => match cast(array, &DataType::Utf8) {
             Ok(text) => {
                 let strings = text.as_string::<i32>();
@@ -364,6 +401,13 @@ fn arrow_column(array: &ArrayRef, column: &Column) -> Result<ArrayRef, EngineErr
             }
         },
     })
+}
+
+/// Arrow's fixed-size list of 32-bit integers or floats, as Snowflake sends vectors.
+fn vector_type(column: &Column) -> DataType {
+    let (element, dimension) = column.vector.unwrap_or((SfType::Real, 0));
+    let item = if element == SfType::Fixed { DataType::Int32 } else { DataType::Float32 };
+    DataType::FixedSizeList(Arc::new(Field::new("item", item, false)), dimension)
 }
 
 fn timestamp_fields() -> Fields {

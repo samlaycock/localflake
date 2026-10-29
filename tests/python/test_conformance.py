@@ -191,7 +191,7 @@ def canonical(value, typ):
         return text
     if base == "BINARY":
         return bytes(value).hex()
-    if base in ("VARIANT", "OBJECT", "ARRAY"):
+    if base in ("VARIANT", "OBJECT", "ARRAY", "VECTOR"):
         parsed = json.loads(value) if isinstance(value, str) else value
         return json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return value
