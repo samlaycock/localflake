@@ -246,6 +246,17 @@ pub fn median(types: &SiteTypes, f: &mut Function, arg: Expr) -> Option<Expr> {
     }
 }
 
+/// A vector operand for an aggregate (`VECTOR_SUM(v)`, ...): the expression
+/// to aggregate, and the vector's storage type (`FLOAT[3]`) once probed, so
+/// the result can be cast back to a vector.
+pub fn vector_operand(types: &SiteTypes, value: Expr) -> (Expr, Option<String>) {
+    match types.raw_site(std::slice::from_ref(&value), "sf_probe") {
+        RawSite::Probe(probe) => (*probe, None),
+        RawSite::Typed(t) => (value, t.into_iter().next().filter(|t| t.ends_with(']') && !t.ends_with("[]"))),
+        RawSite::Unknown => (value, None),
+    }
+}
+
 fn renamed(f: &Function, name: &str) -> Expr {
     let mut f = f.clone();
     f.name = object_name(&[name]);

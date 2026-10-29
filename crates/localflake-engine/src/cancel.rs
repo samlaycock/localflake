@@ -15,8 +15,8 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use duckdb::InterruptHandle;
-use duckdb::arrow::array::{ArrayRef, AsArray, StringArray};
-use duckdb::arrow::datatypes::DataType;
+use duckdb::arrow::array::{Array, ArrayRef, AsArray, StringArray};
+use duckdb::arrow::datatypes::{DataType, Int64Type};
 use duckdb::vscalar::{ArrowFunctionSignature, VArrowScalar};
 
 use crate::EngineError;
@@ -59,6 +59,7 @@ impl CancelToken {
 }
 
 struct Statement {
+    session_id: u64,
     token: CancelToken,
     interrupt: Arc<InterruptHandle>,
     deadline: Option<Instant>,
@@ -87,11 +88,13 @@ impl Running {
     pub(crate) fn start(
         self: &Arc<Self>,
         query_id: &str,
+        session_id: u64,
         token: &CancelToken,
         interrupt: Arc<InterruptHandle>,
         timeout: Option<Duration>,
     ) -> RunningGuard {
-        let statement = Statement { token: token.clone(), interrupt, deadline: timeout.map(|t| Instant::now() + t) };
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let statement = Statement { session_id, token: token.clone(), interrupt, deadline };
         self.statements.lock().unwrap().insert(query_id.to_owned(), statement);
         self.wake.notify_one();
         RunningGuard { running: self.clone(), query_id: query_id.to_owned() }
@@ -104,6 +107,18 @@ impl Running {
         statement.token.cancel();
         statement.interrupt.interrupt();
         true
+    }
+
+    /// Cancels every running statement of a session, returning how many there were.
+    pub(crate) fn cancel_session(&self, session_id: u64) -> usize {
+        let statements = self.statements.lock().unwrap();
+        let mut cancelled = 0;
+        for statement in statements.values().filter(|s| s.session_id == session_id) {
+            statement.token.cancel();
+            statement.interrupt.interrupt();
+            cancelled += 1;
+        }
+        cancelled
     }
 
     #[cfg(test)]
@@ -138,6 +153,35 @@ fn watchdog(running: Weak<Running>) {
         }
         let wait = if statements.is_empty() { IDLE } else { TICK };
         drop(running.wake.wait_timeout(statements, wait).unwrap());
+    }
+}
+
+/// `sf_cancel_all_queries(session_id, caller_session_id, nonce)`:
+/// `SYSTEM$CANCEL_ALL_QUERIES`. The caller's own statement is the one running
+/// it, so cancelling the caller's session cancels nothing.
+pub(crate) struct CancelAllQueries;
+
+impl VArrowScalar for CancelAllQueries {
+    type State = Arc<Running>;
+
+    fn invoke(running: &Arc<Running>, input: duckdb::arrow::array::RecordBatch) -> Result<ArrayRef, Box<dyn Error>> {
+        let sessions = input.column(0).as_primitive::<Int64Type>();
+        let callers = input.column(1).as_primitive::<Int64Type>();
+        let out: StringArray = (0..input.num_rows())
+            .map(|i| {
+                (!sessions.is_null(i)).then(|| {
+                    let session = sessions.value(i);
+                    let cancelled =
+                        if session == callers.value(i) { 0 } else { running.cancel_session(session as u64) };
+                    format!("{cancelled} cancelled.")
+                })
+            })
+            .collect();
+        Ok(Arc::new(out))
+    }
+
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(vec![DataType::Int64, DataType::Int64, DataType::Float64], DataType::Utf8)]
     }
 }
 

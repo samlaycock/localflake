@@ -20,6 +20,11 @@ pub struct Context {
     pub parameters: BTreeMap<String, String>,
     /// Operand types for type-directed rewrites (see [`crate::SiteTypes`]).
     pub types: crate::SiteTypes,
+    /// The statement being run, as written (for `CURRENT_STATEMENT()`).
+    pub statement: String,
+    /// The open transaction's ID, and the last one committed or rolled back.
+    pub transaction: Option<String>,
+    pub last_transaction: Option<String>,
 }
 
 /// Session parameters and their defaults, as reported by `SHOW PARAMETERS`.

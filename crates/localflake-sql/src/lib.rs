@@ -31,7 +31,9 @@ pub use context::{Context, DEFAULT_PARAMETERS, TimestampMapping};
 pub use meta::{Scope, Show};
 pub use normalize::{CASE_MARKER, decode_identifier, encode_identifier, normalize_identifiers};
 pub use rewrite::result_table;
-pub use translate::{Command, InsertParts, SqlCommand, StatementKind, UseTarget, split, translate_statement};
+pub use translate::{
+    Command, InsertParts, SqlCommand, StatementKind, UseTarget, split, split_original, translate_statement,
+};
 pub use typing::SiteTypes;
 pub use views::replace_user_comment;
 

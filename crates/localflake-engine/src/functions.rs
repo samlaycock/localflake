@@ -31,6 +31,8 @@ pub fn register(conn: &Connection) -> duckdb::Result<()> {
     conn.register_scalar_function::<ToTimestampTz>("sf_to_timestamp_tz")?;
     conn.register_scalar_function::<ToDate>("sf_to_date")?;
     conn.register_scalar_function::<Soundex>("sf_soundex")?;
+    conn.register_scalar_function::<SoundexP123>("sf_soundex_p123")?;
+    conn.register_scalar_function::<Wait>("sf_wait")?;
     conn.register_scalar_function::<Sha2>("sf_sha2")?;
     conn.register_scalar_function::<InitCap>("sf_initcap")?;
     conn.register_scalar_function::<ParseUrl>("sf_parse_url")?;
@@ -410,7 +412,7 @@ impl VArrowScalar for Soundex {
     type State = ();
 
     fn invoke(_: &(), input: RecordBatch) -> Result<ArrayRef> {
-        map_strings(&input, |s, _| Ok(Some(soundex(s))))
+        map_strings(&input, |s, _| Ok(Some(soundex(s, false))))
     }
 
     fn signatures() -> Vec<ArrowFunctionSignature> {
@@ -418,7 +420,63 @@ impl VArrowScalar for Soundex {
     }
 }
 
-fn soundex(s: &str) -> String {
+/// `SOUNDEX_P123(s)`: SOUNDEX that keeps the second letter's digit when it
+/// matches the first letter's (`Pfister` is P123, not P236).
+struct SoundexP123;
+
+impl VArrowScalar for SoundexP123 {
+    type State = ();
+
+    fn invoke(_: &(), input: RecordBatch) -> Result<ArrayRef> {
+        map_strings(&input, |s, _| Ok(Some(soundex(s, true))))
+    }
+
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        strings(1)
+    }
+}
+
+/// `SYSTEM$WAIT(amount, unit)`: sleeps, then reports `waited 2 minutes`. The
+/// third argument is a volatile nonce, so DuckDB doesn't fold (and run) the
+/// call when it only prepares the statement.
+struct Wait;
+
+impl VArrowScalar for Wait {
+    type State = ();
+
+    fn invoke(_: &(), input: RecordBatch) -> Result<ArrayRef> {
+        let amounts = input.column(0).as_primitive::<Float64Type>();
+        let units = input.column(1).as_string::<i32>();
+        let out: StringArray = (0..input.num_rows())
+            .map(|i| -> Result<Option<String>> {
+                if amounts.is_null(i) || units.is_null(i) {
+                    return Ok(None);
+                }
+                let (amount, unit) = (amounts.value(i), units.value(i).to_lowercase());
+                let seconds = match unit.as_str() {
+                    "days" => 86_400.0,
+                    "hours" => 3_600.0,
+                    "minutes" => 60.0,
+                    "seconds" => 1.0,
+                    "milliseconds" => 1e-3,
+                    "microseconds" => 1e-6,
+                    "nanoseconds" => 1e-9,
+                    _ => return Err(format!("invalid time unit '{unit}' for SYSTEM$WAIT").into()),
+                };
+                std::thread::sleep(std::time::Duration::from_secs_f64((amount * seconds).max(0.0)));
+                let amount = if amount.fract() == 0.0 { format!("{}", amount as i64) } else { amount.to_string() };
+                Ok(Some(format!("waited {amount} {unit}")))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Arc::new(out))
+    }
+
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(vec![DataType::Float64, DataType::Utf8, DataType::Float64], DataType::Utf8)]
+    }
+}
+
+fn soundex(s: &str, p123: bool) -> String {
     let code = |c: char| match c.to_ascii_lowercase() {
         'b' | 'f' | 'p' | 'v' => Some('1'),
         'c' | 'g' | 'j' | 'k' | 'q' | 's' | 'x' | 'z' => Some('2'),
@@ -431,7 +489,7 @@ fn soundex(s: &str) -> String {
     let mut letters = s.chars().filter(char::is_ascii_alphabetic);
     let Some(first) = letters.next() else { return String::new() };
     let mut out = first.to_ascii_uppercase().to_string();
-    let mut last = code(first);
+    let mut last = if p123 { None } else { code(first) };
     for c in letters {
         let digit = code(c);
         if let Some(d) = digit
@@ -934,6 +992,8 @@ fn variant_label(kind: &str, text: Option<&str>) -> Option<&'static str> {
         "VARCHAR" => "VARCHAR",
         "DATE" => "DATE",
         k if k.starts_with("TIMESTAMP") && (k.ends_with("TIME ZONE") || k.ends_with("_TZ")) => "TIMESTAMP_LTZ",
+        // TIMESTAMP_TZ is stored as TIMESTAMP_NS (see the `tz` module).
+        k if k.starts_with("TIMESTAMP") && (k.contains("NANO") || k.ends_with("_NS")) => "TIMESTAMP_TZ",
         k if k.starts_with("TIMESTAMP") => "TIMESTAMP_NTZ",
         k if k.starts_with("TIME") => "TIME",
         "BLOB" => "BINARY",
@@ -1302,11 +1362,11 @@ mod tests {
 
     #[test]
     fn soundex_codes() {
-        assert_eq!(super::soundex("Robert"), "R163");
-        assert_eq!(super::soundex("Rupert"), "R163");
-        assert_eq!(super::soundex("Ashcraft"), "A261");
-        assert_eq!(super::soundex("Tymczak"), "T522");
-        assert_eq!(super::soundex("Pfister"), "P236");
+        assert_eq!(super::soundex("Robert", false), "R163");
+        assert_eq!(super::soundex("Rupert", false), "R163");
+        assert_eq!(super::soundex("Ashcraft", false), "A261");
+        assert_eq!(super::soundex("Tymczak", false), "T522");
+        assert_eq!(super::soundex("Pfister", false), "P236");
     }
 
     #[test]
