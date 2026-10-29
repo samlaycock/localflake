@@ -475,9 +475,13 @@ pub const JSON_NULL: &str = "\u{E000}null";
 /// Renders semi-structured JSON text the way Snowflake prints it: the JSON
 /// null marker as `null`, SQL NULL elements (Snowflake's missing values) as
 /// `undefined`, and pretty-printed with two-space indentation if `pretty`.
+/// XML values (from PARSE_XML) print as XML.
 pub fn render_json(text: &str, pretty: bool) -> String {
     match serde_json::from_str::<serde_json::Value>(text) {
         Ok(value) => {
+            if let Some(xml) = crate::xml::render(&value, pretty) {
+                return xml;
+            }
             let mut out = String::new();
             write_json(&value, pretty, 0, &mut out);
             out

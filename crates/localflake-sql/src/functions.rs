@@ -241,6 +241,8 @@ const OBJECT_RESULTS: &[&str] = &[
     "AS_OBJECT",
     "ARRAYS_TO_OBJECT",
     "HLL_EXPORT",
+    "PARSE_XML",
+    "XMLGET",
     "APPROX_PERCENTILE_ACCUMULATE",
     "APPROX_PERCENTILE_COMBINE",
     "APPROX_TOP_K_ACCUMULATE",
@@ -783,6 +785,26 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
                 custom_type("VARIANT"),
             );
             case(vec![(is_null(value.clone()), null()), (is_array, value)], Some(wrapped))
+        }
+        "PARSE_XML" => {
+            let disable = opt_arg(1)?.unwrap_or_else(|| Expr::Value(Value::Boolean(false).into()));
+            cast(
+                func(
+                    "sf_parse_xml",
+                    vec![arg(0)?, func("coalesce", vec![disable, Expr::Value(Value::Boolean(false).into())])],
+                ),
+                custom_type("JSON"),
+            )
+        }
+        "CHECK_XML" => func("sf_check_xml", vec![arg(0)?]),
+        "XMLGET" => {
+            let object = cast(func("sf_object_json", vec![arg(0)?]), DataType::Varchar(None));
+            let instance = opt_arg(2)?.unwrap_or_else(|| number(0));
+            cast(func("sf_xmlget", vec![object, arg(1)?, cast(instance, DataType::BigInt(None))]), custom_type("JSON"))
+        }
+        "TO_XML" => {
+            let text = cast(cast(cast(arg(0)?, custom_type("VARIANT")), custom_type("JSON")), DataType::Varchar(None));
+            func("sf_to_xml", vec![text])
         }
         "TO_JSON" => cast(cast(cast(arg(0)?, custom_type("VARIANT")), custom_type("JSON")), DataType::Varchar(None)),
         "OBJECT_CONSTRUCT" | "OBJECT_CONSTRUCT_KEEP_NULL" => {
