@@ -250,9 +250,16 @@ pub fn median(types: &SiteTypes, f: &mut Function, arg: Expr) -> Option<Expr> {
 /// to aggregate, and the vector's storage type (`FLOAT[3]`) once probed, so
 /// the result can be cast back to a vector.
 pub fn vector_operand(types: &SiteTypes, value: Expr) -> (Expr, Option<String>) {
+    let (operand, type_name) = probed_operand(types, value);
+    (operand, type_name.filter(|t| t.ends_with(']') && !t.ends_with("[]")))
+}
+
+/// An operand whose DuckDB type a rewrite needs: the expression to use in
+/// its place, and its type once probed (`BIGINT`, `DECIMAL(10,2)`, `FLOAT[3]`).
+pub fn probed_operand(types: &SiteTypes, value: Expr) -> (Expr, Option<String>) {
     match types.raw_site(std::slice::from_ref(&value), "sf_probe") {
         RawSite::Probe(probe) => (*probe, None),
-        RawSite::Typed(t) => (value, t.into_iter().next().filter(|t| t.ends_with(']') && !t.ends_with("[]"))),
+        RawSite::Typed(t) => (value, t.into_iter().next().filter(|t| t != "OTHER")),
         RawSite::Unknown => (value, None),
     }
 }
