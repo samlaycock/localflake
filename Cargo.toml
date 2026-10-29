@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+localflake-sql = { path = "crates/localflake-sql" }
+localflake-engine = { path = "crates/localflake-engine" }
+
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+arrow-array = { version = "60", features = ["chrono-tz"] }
+arrow-ipc = "60"
+base64 = "0.23"
+chrono = "0.4"
+chrono-tz = "0.10"
+duckdb = { version = "1.20000", features = ["bundled", "json", "vscalar", "vscalar-arrow", "appender-arrow"] }
+flate2 = "1"
+md5 = { package = "md-5", version = "0.11" }
+sha2 = "0.11"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+sqlparser = { version = "0.63", features = ["visitor"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Keep target/ small: the bundled DuckDB build is huge with full debug info.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false

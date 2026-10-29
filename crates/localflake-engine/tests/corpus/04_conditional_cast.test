@@ -1,0 +1,82 @@
+# Conditional expressions, NULL handling, booleans and casts.
+
+query
+select iff(1 > 2, 'a', 'b'), iff(null, 'a', 'b'), case when 1 = 1 then 'x' end, case 2 when 1 then 'one' when 2 then 'two' else 'other' end
+----
+b|b|x|two
+
+query
+select coalesce(null, null, 3), nvl(null, 1), ifnull(null, 2), nvl2(1, 'a', 'b'), nullif(1, 1), nullif(1, 2)
+----
+3|1|2|a|NULL|1
+
+query
+select decode(null, null, 'match', 'nomatch'), decode(3, 1, 'one', 2, 'two'), equal_null(1, null), 1 is distinct from null, null is not distinct from null
+----
+match|NULL|false|true|true
+
+query
+select booland(1, 0), boolor(0, 3), boolxor(1, 1), boolnot(0), not true, true and null, false and null, true or null
+----
+false|true|false|true|false|NULL|false|true
+
+query
+select '1'::boolean, 'yes'::boolean, 'off'::boolean, to_boolean('T'), to_boolean(0), try_to_boolean('maybe'), 2::boolean
+----
+true|true|false|true|false|NULL|true
+
+query
+select try_cast('x' as int), try_cast('12' as int), try_cast('2024-02-30' as date), cast('2024-03-15' as date), '42'::varchar::int + 1
+----
+NULL|12|NULL|2024-03-15|43
+
+query
+select cast(1 as varchar(10)), cast(1.239 as number(10,2)), 1.5::int, -1.5::int, '1e3'::float, '  12 '::int
+----
+1|1.24|2|-2|1000|12
+
+query
+select to_binary('616263', 'hex'), to_binary('YWJj', 'base64'), to_binary('abc', 'utf-8'), hex_encode(to_binary('ab', 'utf-8'))
+----
+616263|616263|616263|6162
+
+query
+select 1 = 1.0, '1' = 1, 1 in (1, 2), 3 not in (1, 2), null in (1, 2), 1 not in (2, null)
+----
+true|true|true|true|NULL|NULL
+
+query
+select 2 between 1 and 3, 2 not between 3 and 4, 'b' between 'a' and 'c', null between 1 and 2
+----
+true|true|true|NULL
+
+query
+select regr_slope(y, x), regr_intercept(y, x), regr_count(y, x) from (values (1, 2), (2, 4), (3, 6)) t(x, y)
+----
+2|0|3
+
+query
+select typeof(1::variant), typeof('a'::variant), typeof(1.5::variant), typeof(true::variant), typeof(parse_json('null')), typeof(null::variant)
+----
+INTEGER|VARCHAR|DECIMAL|BOOLEAN|NULL_VALUE|NULL
+
+query
+select system$typeof(1), system$typeof('a'), system$typeof(1.5::float)
+----
+NUMBER(1,0)[SB1]|VARCHAR(1)[LOB]|FLOAT[DOUBLE]
+
+query
+select cast(null as int) is null, null::varchar || 'x', (null = null) is null
+----
+true|NULL|true
+
+error 100038
+select '1.2.3'::number
+
+error 100037
+select 'maybe'::boolean
+
+query
+select system$typeof(1234), system$typeof(12.50), system$typeof(true), system$typeof(1::bigint), system$typeof('2024-01-01'::date)
+----
+NUMBER(4,0)[SB2]|NUMBER(4,2)[SB2]|BOOLEAN[SB1]|NUMBER(38,0)[SB8]|DATE[SB4]

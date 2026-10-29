@@ -1,0 +1,12 @@
+{
+  "name": "localflake-e2e-node",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end tests driving localflake with the official Snowflake Node.js driver",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "snowflake-sdk": "^2"
+  }
+}

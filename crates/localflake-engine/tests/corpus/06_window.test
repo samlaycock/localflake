@@ -1,0 +1,98 @@
+# Window functions.
+
+statement ok
+create table w (g varchar, x int, y int)
+
+statement ok
+insert into w values ('a', 1, 10), ('a', 2, null), ('a', 3, 30), ('b', 1, 5), ('b', 2, 5)
+
+query
+select g, x, row_number() over (partition by g order by x desc), rank() over (order by y), dense_rank() over (order by y) from w order by g, x
+----
+a|1|3|3|2
+a|2|2|5|4
+a|3|1|4|3
+b|1|2|1|1
+b|2|1|1|1
+
+query
+select g, x, lag(y) over (partition by g order by x), lead(y, 1, -1) over (partition by g order by x), lag(y) ignore nulls over (partition by g order by x) from w order by g, x
+----
+a|1|NULL|NULL|NULL
+a|2|10|30|10
+a|3|NULL|-1|10
+b|1|NULL|5|NULL
+b|2|5|-1|5
+
+query
+select g, x, first_value(y) over (partition by g order by x), last_value(y) over (partition by g order by x rows between unbounded preceding and unbounded following), nth_value(y, 2) over (partition by g order by x rows between unbounded preceding and unbounded following) from w order by g, x
+----
+a|1|10|30|NULL
+a|2|10|30|NULL
+a|3|10|30|NULL
+b|1|5|5|5
+b|2|5|5|5
+
+query
+select g, x, sum(x) over (partition by g order by x), sum(x) over (partition by g), avg(x) over (partition by g order by x rows between 1 preceding and current row) from w order by g, x
+----
+a|1|1|6|1.000000
+a|2|3|6|1.500000
+a|3|6|6|2.500000
+b|1|1|3|1.000000
+b|2|3|3|1.500000
+
+query
+select g, x, ntile(2) over (partition by g order by x), percent_rank() over (partition by g order by x), cume_dist() over (partition by g order by x) from w order by g, x
+----
+a|1|1|0|0.3333333333333333
+a|2|1|0.5|0.6666666666666666
+a|3|2|1|1
+b|1|1|0|0.5
+b|2|2|1|1
+
+query
+select g, x, ratio_to_report(x) over (partition by g) from w order by g, x
+----
+a|1|0.166667
+a|2|0.333333
+a|3|0.500000
+b|1|0.333333
+b|2|0.666667
+
+query
+select g, x, conditional_change_event(y) over (partition by g order by x), conditional_true_event(x > 1) over (partition by g order by x) from w order by g, x
+----
+a|1|0|0
+a|2|0|1
+a|3|1|2
+b|1|0|0
+b|2|0|1
+
+query
+select g, x, count(*) over (partition by g order by x range between unbounded preceding and current row), max(y) over (order by x, g rows 1 preceding) from w order by x, g
+----
+a|1|1|10
+b|1|1|10
+a|2|2|5
+b|2|2|5
+a|3|3|30
+
+query
+select x, sum(x) over (order by x range between 1 preceding and current row) from (values (1), (2), (4)) t(x) order by x
+----
+1|1
+2|3
+4|4
+
+query
+select g, x from w qualify row_number() over (partition by g order by x desc) = 1 order by g
+----
+a|3
+b|2
+
+query
+select g, array_agg(x) within group (order by x) over (partition by g) from w where g = 'b'
+----
+b|[1,2]
+b|[1,2]

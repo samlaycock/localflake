@@ -1,0 +1,338 @@
+# Stages, file formats, COPY INTO (unload and load) and queries over staged files.
+
+statement ok
+create table src (id int, name varchar, amount number(10,2), d date, v variant)
+
+statement ok
+insert into src select 1, 'a', 1.50, '2024-01-02', parse_json('{"k":1}') union all select 2, 'b,c', null, null, null
+
+statement ok
+create stage s comment = 'test stage'
+
+statement ok
+copy into @s/out/ from src
+
+query
+select "rows_unloaded" from table(result_scan(last_query_id()))
+----
+2
+
+statement ok
+list @s
+
+query
+select "name", "size" > 0, length("md5"), "last_modified" like '%GMT' from table(result_scan(last_query_id()))
+----
+s/out/data_0_0_0.csv.gz|true|32|true
+
+query
+select $1, $2, $3, $4, $5, metadata$filename, metadata$file_row_number from @s/out/ order by 1
+----
+1|a|1.50|2024-01-02|{"k":1}|out/data_0_0_0.csv.gz|1
+2|b,c|NULL|NULL|NULL|out/data_0_0_0.csv.gz|2
+
+query
+select count(*), max($7) from @s
+----
+2|NULL
+
+statement ok
+create table dst like src
+
+query
+copy into dst from @s/out/
+----
+s/out/data_0_0_0.csv.gz|LOADED|2|2|1|0|NULL|NULL|NULL|NULL
+
+query
+select id, name, amount, d, v:k from dst order by id
+----
+1|a|1.50|2024-01-02|1
+2|b,c|NULL|NULL|NULL
+
+query
+copy into dst from @s/out/
+----
+Copy executed with 0 files processed.
+
+query
+copy into dst from @s files = ('out/data_0_0_0.csv.gz') force = true
+----
+s/out/data_0_0_0.csv.gz|LOADED|2|2|1|0|NULL|NULL|NULL|NULL
+
+query
+select count(*) from dst
+----
+4
+
+# Errors: conversion failures, ON_ERROR and column count checks.
+
+statement ok
+create table nums (n int, label varchar(1))
+
+error 100038
+copy into nums from (select $2, $1 from @s/out/)
+
+error 100080
+copy into nums from @s/out/
+
+query
+copy into nums from @s/out/ file_format = (type = csv error_on_column_count_mismatch = false) on_error = continue
+----
+s/out/data_0_0_0.csv.gz|PARTIALLY_LOADED|2|1|2|1|String is too long and would be truncated|2|1|"NUMS"["LABEL":2]
+
+statement ok
+copy into @s/nums/ from (select '1', 'x' union all select 'oops', 'y' union all select '3', 'zz')
+
+query
+copy into nums from @s/nums/ on_error = 'continue'
+----
+s/nums/data_0_0_0.csv.gz|PARTIALLY_LOADED|3|1|3|2|Numeric value 'oops' is not recognized|2|1|"NUMS"["N":1]
+
+query
+copy into nums from @s/nums/ on_error = skip_file force = true
+----
+s/nums/data_0_0_0.csv.gz|LOAD_FAILED|3|0|1|2|Numeric value 'oops' is not recognized|2|1|"NUMS"["N":1]
+
+query
+copy into nums from @s/nums/ truncatecolumns = true on_error = continue force = true
+----
+s/nums/data_0_0_0.csv.gz|PARTIALLY_LOADED|3|2|3|1|Numeric value 'oops' is not recognized|2|1|"NUMS"["N":1]
+
+query rowsort
+select * from nums
+----
+1|a
+1|x
+1|x
+3|z
+
+query
+copy into nums from @s/nums/ validation_mode = return_1_rows force = true
+----
+1|x
+
+error 100038
+copy into nums from @s/nums/ validation_mode = return_2_rows force = true
+
+# Named file formats, headers and enclosures.
+
+statement ok
+create file format pipe type = csv field_delimiter = '|' skip_header = 1 field_optionally_enclosed_by = '"' null_if = ('NULL', '') comment = 'pipes'
+
+statement ok
+copy into @s/pipe/data.txt from src file_format = (format_name = 'pipe') header = true single = true
+
+query
+select $1, $2, $3 from @s/pipe/ (file_format => 'pipe') order by 1
+----
+1|a|1.50
+2|b,c|NULL
+
+statement ok
+copy into @s/raw/ from (select 'x' as a) file_format = (type = csv compression = none) header = true
+
+statement ok
+list @s/raw
+
+query
+select "name" from table(result_scan(last_query_id()))
+----
+s/raw/data_0_0_0.csv
+
+query
+select $1 from @s/raw/data_0_0_0.csv
+----
+A
+x
+
+statement ok
+show file formats like 'PI%'
+
+query
+select "name", "type", "comment" from table(result_scan(last_query_id()))
+----
+PIPE|CSV|pipes
+
+statement ok
+describe file format pipe
+
+query
+select "property_value" from table(result_scan(last_query_id())) where "property" in ('FIELD_DELIMITER', 'SKIP_HEADER', 'NULL_IF') order by "property"
+----
+|
+[NULL, ]
+1
+
+# JSON: unload objects, query them, load by column name.
+
+statement ok
+create file format jf type = json
+
+statement ok
+copy into @s/j/ from (select object_construct('id', id, 'Name', name) from src) file_format = (type = json)
+
+query
+select $1:id, $1:Name::string from @s/j/ (file_format => 'jf') order by 1
+----
+1|a
+2|b,c
+
+statement ok
+create table jt (id int, name varchar)
+
+query
+copy into jt from @s/j/ file_format = (format_name = jf) match_by_column_name = case_insensitive
+----
+s/j/data_0_0_0.json.gz|LOADED|2|2|1|0|NULL|NULL|NULL|NULL
+
+query
+select * from jt order by id
+----
+1|a
+2|b,c
+
+statement ok
+create table jv (v variant)
+
+statement ok
+copy into jv from @s/j/ file_format = (type = json)
+
+query
+select v:Name::string from jv order by v:id
+----
+a
+b,c
+
+error 002019
+copy into jt from @s/j/ file_format = (type = json) force = true
+
+# Transformations.
+
+statement ok
+create table tx (id int, name varchar, file varchar)
+
+statement ok
+copy into tx from (select t.$1, upper(t.$2), metadata$filename from @s/out/ t)
+
+query
+select * from tx order by id
+----
+1|A|out/data_0_0_0.csv.gz
+2|B,C|out/data_0_0_0.csv.gz
+
+# Parquet.
+
+statement ok
+copy into @s/p/ from src file_format = (type = parquet)
+
+error 002003
+select $1 from @s/p/ (file_format => 'pq_missing')
+
+statement ok
+create file format pq type = parquet
+
+query
+select $1:ID, $1:NAME::string from @s/p/ (file_format => 'pq') order by 1
+----
+1|a
+2|b,c
+
+statement ok
+create table pt (id int, name varchar, amount number(10,2))
+
+statement ok
+copy into pt from @s/p/ file_format = (format_name = 'pq') match_by_column_name = case_insensitive
+
+query
+select * from pt order by id
+----
+1|a|1.50
+2|b,c|NULL
+
+# Table and user stages, REMOVE, SHOW and DESCRIBE.
+
+statement ok
+copy into @%src from src
+
+statement ok
+list @%src
+
+query
+select "name" from table(result_scan(last_query_id()))
+----
+data_0_0_0.csv.gz
+
+statement ok
+copy into @~/backup/ from src overwrite = true
+
+query
+select count(*) from @~/backup/
+----
+2
+
+statement ok
+remove @~/backup/
+
+query
+select "result" from table(result_scan(last_query_id()))
+----
+removed
+
+statement ok
+remove @s pattern = '.*nums.*'
+
+statement ok
+list @s pattern = '.*[.]gz'
+
+query
+select "name" from table(result_scan(last_query_id()))
+----
+s/j/data_0_0_0.json.gz
+s/out/data_0_0_0.csv.gz
+
+error 001030
+copy into @s/out/ from src
+
+statement ok
+copy into @s/out/ from src overwrite = true
+
+statement ok
+show stages like 's'
+
+query
+select "name", "type", "comment" from table(result_scan(last_query_id()))
+----
+S|INTERNAL|test stage
+
+statement ok
+create temporary stage tmp_s file_format = (type = csv field_delimiter = ';')
+
+statement ok
+desc stage tmp_s
+
+query
+select "property_value" from table(result_scan(last_query_id())) where "property" = 'FIELD_DELIMITER'
+----
+;
+
+statement ok
+alter stage tmp_s rename to tmp_t
+
+error 002003
+list @tmp_s
+
+statement ok
+drop stage tmp_t
+
+statement ok
+drop stage s
+
+error 002003
+list @s
+
+statement ok
+drop stage if exists s
+
+statement ok
+drop file format pipe

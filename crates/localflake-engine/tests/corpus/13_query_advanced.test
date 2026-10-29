@@ -1,0 +1,220 @@
+# More query syntax.
+
+statement ok
+create table s (region varchar, month varchar, amount int)
+
+statement ok
+insert into s values ('n', 'jan', 10), ('n', 'feb', 20), ('s', 'jan', 5), ('s', 'mar', 7)
+
+query
+select * from s pivot (sum(amount) for month in ('jan', 'feb', 'mar')) as p order by region
+----
+n|10|20|NULL
+s|5|NULL|7
+
+query
+select * from s pivot (sum(amount) for month in ('jan' as january, 'feb' as february)) order by region
+----
+n|10|20
+s|5|NULL
+
+query
+select region, january from (select region, month, amount from s) pivot (max(amount) for month in ('jan' as january, 'mar' as march)) where march is not null
+----
+s|5
+
+query rowsort
+select region, mon, val from (select 'n' as region, 1 as jan, null as feb) unpivot include nulls (val for mon in (jan, feb))
+----
+n|FEB|NULL
+n|JAN|1
+
+query rowsort
+select region, mon, val from (select 'n' as region, 1 as jan, null as feb) unpivot (val for mon in (jan, feb))
+----
+n|JAN|1
+
+query
+select region, sum(amount) from s group by 1 order by 2 desc
+----
+n|30
+s|12
+
+query
+select region as r, count(*) as c from s group by r order by c desc, r
+----
+n|2
+s|2
+
+query
+select region, month, amount, sum(amount) over (partition by region) as total from s qualify total > 20 order by month
+----
+n|feb|20|30
+n|jan|10|30
+
+query
+select distinct region from s order by region desc limit 1
+----
+s
+
+query
+select region from s group by region having max(amount) > 15
+----
+n
+
+query rowsort
+select a.region, b.region from s a, s b where a.amount = b.amount * 2
+----
+n|n
+n|s
+
+query
+select count(*) from s where (region, month) in (select 'n', 'jan')
+----
+1
+
+query
+select count(*) from s where amount not in (select amount from s where region = 's')
+----
+2
+
+query
+select region, (select max(amount) from s s2 where s2.region = s.region) from s where month = 'jan' order by 1
+----
+n|20
+s|7
+
+query
+with a as (select 1 as x), b as (select x + 1 as y from a) select x, y from a, b
+----
+1|2
+
+query
+with t(c1, c2) as (select 1, 2) select c2 from t
+----
+2
+
+query
+select * from (values (1, 'a'), (2, 'b')) as v(id, name) where id = 2
+----
+2|b
+
+query
+select column1, column2 from values (1, 'one') , (2, 'two') order by column1 desc
+----
+2|two
+1|one
+
+query
+select x from (select 1 as x union select 1 union select 2) order by x
+----
+1
+2
+
+query
+select 1 union all select 2 order by 1 desc limit 1
+----
+2
+
+query
+(select 1 as x) except (select 2) intersect (select 1)
+----
+1
+
+query
+select count(*) from s natural full join (select 'n' as region) r
+----
+4
+
+query rowsort
+select * from (select 1 as id, 'a' as v) l full outer join (select 2 as id, 'b' as v) r using (id)
+----
+1|a|NULL
+2|NULL|b
+
+query
+select count(*) from s inner join s s2 using (region, month)
+----
+4
+
+query
+select f.value from table(flatten(input => parse_json('[10, 20]'))) f order by f.index desc
+----
+20
+10
+
+query
+select t.value::int * 2 from table(split_to_table('1,2,3', ',')) t order by t.index
+----
+2
+4
+6
+
+query rowsort
+select s.region, f.value::string from s, lateral flatten(input => split(s.month, 'a')) f where s.region = 's' and s.month = 'jan'
+----
+s|j
+s|n
+
+query
+select count(*) from table(generator(rowcount => 5)) a, table(generator(rowcount => 3)) b
+----
+15
+
+query
+select row_number() over (order by seq4()) from table(generator(rowcount => 3)) order by 1
+----
+1
+2
+3
+
+query
+select listagg(month, ',') within group (order by amount) over () from s where region = 'n'
+----
+jan,feb
+jan,feb
+
+query
+select region, any_value(month) is not null, count(distinct month) from s group by region order by region
+----
+n|true|2
+s|true|2
+
+query
+select region, month, amount from s order by amount desc nulls last, region limit 2 offset 1
+----
+n|jan|10
+s|mar|7
+
+query
+select * from s match_recognize (partition by region order by month measures count(*) as c one row per match pattern (a+) define a as amount > 0) order by region
+----
+n|2
+s|2
+
+query
+select object_construct(*) from (select 1 as a, 'x' as b)
+----
+{"A":1,"B":"x"}
+
+query
+select array_agg(object_construct('r', region)) within group (order by region, month) from s where amount > 9
+----
+[{"r":"n"},{"r":"n"}]
+
+query
+select exists(select 1 from s where amount > 100), not exists(select 1 from s)
+----
+false|false
+
+query
+select case when amount between 5 and 10 then 'low' when amount > 10 then 'high' end as band, count(*) from s group by band order by band
+----
+high|1
+low|3
+
+query
+select iff(count(*) > 0, 'some', 'none') from s where 1 = 0
+----
+none
+

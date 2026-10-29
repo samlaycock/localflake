@@ -1,0 +1,128 @@
+# Aggregate functions and grouping.
+
+statement ok
+create table sales (region varchar, product varchar, amount number(10,2), qty int)
+
+statement ok
+insert into sales values ('east', 'a', 10.00, 1), ('east', 'b', 20.50, 2), ('west', 'a', 5.25, 3), ('west', 'a', null, 4), ('north', 'c', 100, null)
+
+query
+select count(*), count(amount), count(distinct region), sum(qty), min(amount), max(product) from sales
+----
+5|4|3|10|5.25|c
+
+query types
+select avg(qty), avg(amount), sum(amount) from sales
+----
+NUMBER(*,6)|NUMBER(*,8)|NUMBER(*,2)
+2.500000|33.93750000|135.75
+
+query rowsort
+select region, sum(amount), count(*) from sales group by region
+----
+east|30.50|2
+north|100.00|1
+west|5.25|2
+
+query rowsort
+select region, count(*) from sales group by all having count(*) > 1
+----
+east|2
+west|2
+
+query rowsort
+select region, product, sum(qty) from sales group by rollup (region, product)
+----
+east|a|1
+east|b|2
+east|NULL|3
+north|c|NULL
+north|NULL|NULL
+west|a|7
+west|NULL|7
+NULL|NULL|10
+
+query rowsort
+select region, product, grouping(region), grouping(product), count(*) from sales group by cube (region, product) having grouping(region) = 1
+----
+NULL|a|1|0|3
+NULL|b|1|0|1
+NULL|c|1|0|1
+NULL|NULL|1|1|5
+
+query rowsort
+select region, product, count(*) from sales group by grouping sets ((region), (product), ())
+----
+east|NULL|2
+north|NULL|1
+west|NULL|2
+NULL|a|3
+NULL|b|1
+NULL|c|1
+NULL|NULL|5
+
+query
+select count_if(qty > 1), sum(iff(region = 'east', 1, 0)), any_value(region) is not null, mode(product) from sales
+----
+3|2|true|a
+
+query
+select max_by(product, qty), min_by(region, amount), max_by(product, qty, 2) from sales
+----
+a|west|["a","a"]
+
+query
+select booland_agg(qty > 0), boolor_agg(qty > 3), bitand_agg(qty), bitor_agg(qty), bitxor_agg(qty) from sales
+----
+true|true|0|7|4
+
+query
+select median(qty), percentile_cont(0.5) within group (order by qty)::float, percentile_disc(0.5) within group (order by qty) from sales
+----
+2.500|2.5|2
+
+query
+select variance(x)::number(10,4), var_pop(x)::number(10,4), stddev(x)::number(10,4), stddev_pop(x)::number(10,4) from (values (1), (2), (3), (4)) t(x)
+----
+1.6667|1.2500|1.2910|1.1180
+
+query
+select corr(x, y)::number(10,4), covar_pop(x, y)::number(10,4), covar_samp(x, y)::number(10,4) from (values (1, 2), (2, 4), (3, 6)) t(x, y)
+----
+1.0000|1.3333|2.0000
+
+query
+select array_agg(qty) within group (order by qty desc), array_unique_agg(product), object_agg(product, qty) from sales where region = 'east'
+----
+[2,1]|["a","b"]|{"a":1,"b":2}
+
+query
+select approx_count_distinct(region), hll(region) from sales
+----
+3|3
+
+query
+select listagg(product, '|') within group (order by product) over (partition by region) from sales where region = 'east'
+----
+a|b
+a|b
+
+query
+select sum(distinct qty), avg(distinct qty), count(distinct region, product) from sales
+----
+10|2.500000|4
+
+query
+select kurtosis(x)::number(10,4), skew(x)::number(10,4) from (values (1), (2), (3), (10)) t(x)
+----
+3.2280|1.7636
+
+query
+select count(*) from sales where 1 = 0
+----
+0
+
+query
+select sum(qty) from sales where 1 = 0
+----
+NULL

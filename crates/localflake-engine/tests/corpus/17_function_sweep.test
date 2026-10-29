@@ -1,0 +1,155 @@
+# A sweep over the rest of Snowflake's standard function list.
+
+query
+select sinh(0), cosh(0), tanh(0), asinh(0), acosh(1), atanh(0), cot(pi() / 4) between 0.99 and 1.01
+----
+0|1|0|0|0|0|true
+
+query
+select getbit(5, 0), getbit(5, 1), bitshiftleft(1, 62) > 0, bitnot(5)
+----
+1|0|true|-6
+
+query
+select stddev_samp(x)::number(10,4), var_samp(x)::number(10,4), variance_pop(x)::number(10,4), covar_samp(x, x)::number(10,4) from (values (1), (2), (3), (4)) t(x)
+----
+1.2910|1.6667|1.2500|1.6667
+
+query
+select grouping_id(a, b), a, b, count(*) from (values (1, 'x'), (1, 'y')) t(a, b) group by rollup (a, b) order by 1, 2, 3
+----
+0|1|x|1
+0|1|y|1
+1|1|NULL|2
+3|NULL|NULL|2
+
+query
+select hash_agg(x) = hash_agg(x), hash_agg(x) is not null from (values (1), (2)) t(x)
+----
+true|true
+
+query
+select array_union_agg(a) from (select array_construct(1, 2) as a union all select array_construct(2, 3))
+----
+[1,2,3]
+
+query
+select approx_top_k(x, 1) from (values ('a'), ('a'), ('b')) t(x)
+----
+[["a",2]]
+
+query
+select arrays_zip(array_construct(1, 2), array_construct('a', 'b'))
+----
+[{"$1":1,"$2":"a"},{"$1":2,"$2":"b"}]
+
+query
+select x, first_value(y) ignore nulls over (order by x rows between unbounded preceding and unbounded following) from (values (1, null), (2, 'b'), (3, 'c')) t(x, y) order by x
+----
+1|b
+2|b
+3|b
+
+query
+select nth_value(y, 1) from last over (order by x rows between unbounded preceding and unbounded following) from (values (1, 'a'), (2, 'b')) t(x, y) limit 1
+----
+b
+
+query
+select x, count(*) over (order by d range between interval '1 day' preceding and current row) from (values (1, '2024-01-01'::date), (2, '2024-01-02'::date), (3, '2024-01-04'::date)) t(x, d) order by x
+----
+1|1
+2|2
+3|1
+
+query
+select rtrimmed_length('ab  '), unicode('é'), md5_number_lower64('a') > 0, md5_number_upper64('a') > 0
+----
+2|233|true|true
+
+query rowsort
+select value from table(strtok_split_to_table('a b c', ' '))
+----
+a
+b
+c
+
+query
+select timeadd(hour, 2, '10:00:00'::time), timestampadd(minute, -30, '2024-01-01 00:00'::timestamp), dateadd(week, 1, '2024-01-01'::date)
+----
+12:00:00|2023-12-31 23:30:00|2024-01-08
+
+query
+select hour('10:11:12'::time), minute('10:11:12'::time), second('10:11:12'::time), extract(hour from '2024-01-01 05:00'::timestamp)
+----
+10|11|12|5
+
+query
+select normal(0, 1, 1) is not null, zipf(1, 10, 1) between 1 and 10
+----
+true|true
+
+query
+select date_part(quarter, '2024-08-01'::date), date_part(dayofweekiso, '2024-03-17'::date), date_part(epoch_microsecond, '1970-01-01 00:00:01'::timestamp)
+----
+3|7|1000000
+
+query
+select try_to_time('10:00'), try_to_timestamp('2024-01-01 10:00'), try_to_timestamp_ntz('bad'), try_to_number('12', 4, 1)
+----
+10:00:00|2024-01-01 10:00:00|NULL|12.0
+
+query
+select to_double('1.5'), to_double(2), try_to_double('x'), to_decimal(1.239, 4, 2)
+----
+1.5|2|NULL|1.24
+
+query
+select is_char('a'::variant), is_real(1.5::variant), is_timestamp_ntz('2024-01-01'::timestamp_ntz::variant), is_binary(to_binary('ab', 'utf-8')::variant)
+----
+true|true|true|true
+
+query
+select as_date(to_variant('2024-01-01'::date)), as_number(parse_json('5')), as_timestamp_ntz(to_variant('2024-01-01 10:00'::timestamp_ntz))
+----
+2024-01-01|5|2024-01-01 10:00:00
+
+query
+select to_object(object_construct('a', 1)), to_array(parse_json('[1]')), array_construct_compact(null), object_construct_keep_null('a', null)
+----
+{"a":1}|[1]|[]|{"a":null}
+
+query
+select get(array_construct(1, 2), 1), get(object_construct('a', 1), 'a'), get(parse_json('null'), 'a')
+----
+2|1|NULL
+
+query
+select object_keys(parse_json('{"b": 1, "a": {"c": 2}}')), array_size(object_keys(parse_json('{}')))
+----
+["a","b"]|0
+
+query
+select boolxor(true, false), boolnot(true), booland_agg(x), boolor_agg(x), boolxor_agg(x) from (values (true), (false)) t(x)
+----
+true|false|false|true|true
+
+query
+select count(distinct x), approx_count_distinct(x), any_value(x) is not null from (values (1), (1), (2)) t(x)
+----
+2|2|true
+
+query
+select listagg(x, '-') within group (order by x desc), array_agg(distinct x) within group (order by x) from (values (3), (1), (3)) t(x)
+----
+3-3-1|[1,3]
+
+query
+select mode(x), median(x), percentile_cont(0.25) within group (order by x)::float, percentile_disc(0.25) within group (order by x) from (values (1), (2), (2), (5)) t(x)
+----
+2|2.000|1.75|1
+
+query
+select seq1() < 100, seq2() >= 0, uuid_string() like '%-%-%-%-%'
+----
+true|true|true

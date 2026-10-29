@@ -1,0 +1,214 @@
+# SHOW, DESCRIBE, INFORMATION_SCHEMA, identifiers, session state.
+
+statement ok
+create table people (id int comment 'pk', "Mixed Case" varchar, nm varchar(10))
+
+statement ok
+create schema other
+
+statement ok
+create table other.things (x int)
+
+statement ok
+use schema public
+
+query
+select table_name, table_schema, table_type from information_schema.tables where table_schema in ('PUBLIC', 'OTHER') order by 1
+----
+PEOPLE|PUBLIC|BASE TABLE
+THINGS|OTHER|BASE TABLE
+
+query
+select count(*) from information_schema.schemata where schema_name in ('PUBLIC', 'OTHER', 'INFORMATION_SCHEMA')
+----
+3
+
+query
+select "Mixed Case" from people
+----
+
+error 000904
+select mixed_case from people
+
+error 000904
+select "id" from people
+
+query
+select "ID", Id, id from (select 1 as id)
+----
+1|1|1
+
+query
+select "a"."b" from (select 1 as "b") as "a"
+----
+1
+
+query
+select current_database(), current_schema(), current_role(), current_warehouse() is null
+----
+CORPUS_11_METADATA_SESSION|PUBLIC|ACCOUNTADMIN|true
+
+statement ok
+use schema other
+
+query
+select current_schema(), count(*) from things
+----
+OTHER|0
+
+statement ok
+use schema public
+
+statement ok
+set (a, b) = (1, 'two')
+
+query
+select $a + 1, $b
+----
+2|two
+
+statement ok
+set c = (select count(*) from people)
+
+query
+select $c
+----
+0
+
+statement ok
+unset a
+
+error
+select $a
+
+statement ok
+alter session set timezone = 'UTC' query_tag = 'corpus'
+
+statement ok
+show columns in table people
+
+statement ok
+show schemas
+
+statement ok
+show databases
+
+statement ok
+show views
+
+statement ok
+show functions
+
+statement ok
+show warehouses
+
+statement ok
+show roles
+
+statement ok
+show grants
+
+statement ok
+show users
+
+statement ok
+desc table people
+
+query
+select "name", "type", "null?", "comment" from table(result_scan(last_query_id()))
+----
+ID|NUMBER(38,0)|Y|pk
+Mixed Case|VARCHAR(16777216)|Y|NULL
+NM|VARCHAR(10)|Y|NULL
+
+statement ok
+create warehouse if not exists wh warehouse_size = 'XSMALL'
+
+statement ok
+use warehouse wh
+
+query
+select current_warehouse()
+----
+WH
+
+statement ok
+use role sysadmin
+
+query
+select current_role()
+----
+SYSADMIN
+
+statement ok
+grant usage on database corpus_11_metadata_session to role public
+
+statement ok
+alter warehouse wh suspend
+
+statement ok
+begin transaction
+
+statement ok
+commit work
+
+statement ok
+rollback
+
+statement ok
+start transaction name t1
+
+statement ok
+commit
+
+query
+select last_query_id() is not null, length(last_query_id()) = 36
+----
+true|true
+
+query
+select 1 as "lower", 2 as UPPER, 3 as "Mixed"
+----
+1|2|3
+
+query
+select count(*) from identifier('corpus_11_metadata_session.public.people')
+----
+0
+
+statement ok
+create table cs ("id" int, "ID" int, "Id" varchar)
+
+statement ok
+insert into cs values (1, 2, 'three')
+
+query
+select "id", "ID", id, "Id" from cs
+----
+1|2|2|three
+
+query
+select column_name from information_schema.columns where table_name = 'CS' order by ordinal_position
+----
+id
+ID
+Id
+
+error 000904
+select "iD" from cs
+
+statement ok
+create table "lower_t" (v int)
+
+error 002003
+select * from lower_t
+
+query
+select count(*) from "lower_t"
+----
+0
+
+query
+select table_name from information_schema.tables where table_name = 'lower_t'
+----
+lower_t

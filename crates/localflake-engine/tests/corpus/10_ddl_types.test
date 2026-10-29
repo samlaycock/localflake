@@ -1,0 +1,234 @@
+# DDL and data types.
+
+statement ok
+create table typed (
+  a number, b number(10,2), c int, d bigint, e smallint, f tinyint, g byteint, h decimal(5,1), i numeric(7,3),
+  j float, k double, l real, m float4, n double precision,
+  o varchar, p varchar(20), q string, r text, s char(3), t character,
+  u binary, v varbinary, w boolean, x date, y time, z timestamp, aa timestamp_ntz, ab datetime,
+  ac variant, ad object, ae array
+)
+
+query types
+select a, b, c, h, i, j, o, s, u, w, x, y, z, ac, ad, ae from typed
+----
+NUMBER(*,0)|NUMBER(*,2)|NUMBER(*,0)|NUMBER(*,1)|NUMBER(*,3)|FLOAT|VARCHAR|VARCHAR|BINARY|BOOLEAN|DATE|TIME|TIMESTAMP_NTZ|VARIANT|OBJECT|ARRAY
+
+query
+select column_name, numeric_precision, numeric_scale from information_schema.columns where table_name = 'TYPED' and column_name in ('A', 'B', 'H') order by ordinal_position
+----
+A|38|0
+B|10|2
+H|5|1
+
+query
+select column_name, data_type from information_schema.columns where table_name = 'TYPED' and column_name in ('J', 'O', 'W', 'Z', 'AC', 'AD', 'AE') order by ordinal_position
+----
+J|FLOAT
+O|TEXT
+W|BOOLEAN
+Z|TIMESTAMP_NTZ
+AC|VARIANT
+AD|OBJECT
+AE|ARRAY
+
+statement ok
+insert into typed (b, h, s, ad, ae) select 1.005, 12.34, 'ab', object_construct('k', 1), array_construct(1, 2)
+
+query
+select b, h, s, ad, ae from typed
+----
+1.01|12.3|ab|{"k":1}|[1,2]
+
+statement ok
+create or replace table t1 (id int not null, name varchar default 'anon', created timestamp_ntz default current_timestamp())
+
+statement ok
+insert into t1 (id) values (1)
+
+query
+select id, name, created is not null from t1
+----
+1|anon|true
+
+error 100072
+insert into t1 (name) values ('x')
+
+statement ok
+create table if not exists t1 (other int)
+
+query
+select count(*) from t1
+----
+1
+
+statement ok
+alter table t1 add column score number(5,2)
+
+statement ok
+alter table t1 rename column name to label
+
+statement ok
+alter table t1 drop column score
+
+query
+select column_name from information_schema.columns where table_name = 'T1' order by ordinal_position
+----
+ID
+LABEL
+CREATED
+
+statement ok
+alter table t1 rename to t2
+
+error 002003
+select * from t1
+
+query
+select count(*) from t2
+----
+1
+
+statement ok
+create table t3 as select 1 as x, 'a' as y, 1.5 as z
+
+query types
+select * from t3
+----
+NUMBER(*,0)|VARCHAR|NUMBER(*,1)
+1|a|1.5
+
+statement ok
+create temporary table tmp (a int)
+
+statement ok
+create transient table tr (a int) data_retention_time_in_days = 0
+
+statement ok
+create table cl clone t3
+
+query
+select * from cl
+----
+1|a|1.5
+
+statement ok
+create table lk like t3
+
+query
+select count(*) from lk
+----
+0
+
+statement ok
+create or replace view v1 as select x * 2 as doubled from t3
+
+query
+select doubled from v1
+----
+2
+
+statement ok
+create or replace secure view v2 comment = 'hidden' as select y from t3
+
+query
+select y from v2
+----
+a
+
+statement ok
+create sequence seq start = 10 increment = 5
+
+query
+select seq.nextval, seq.nextval
+----
+10|15
+
+statement ok
+create table withseq (id int default seq.nextval, v varchar)
+
+statement ok
+insert into withseq (v) values ('a'), ('b')
+
+query
+select id, v from withseq order by id
+----
+20|a
+25|b
+
+statement ok
+create table idt (id int identity(1, 1), v varchar)
+
+statement ok
+insert into idt (v) values ('x'), ('y')
+
+query
+select id, v from idt order by id
+----
+1|x
+2|y
+
+statement ok
+drop table if exists nothing_here
+
+statement ok
+drop view v1
+
+error 002003
+select * from v1
+
+statement ok
+comment on table t2 is 'two'
+
+statement ok
+create table pk (id int primary key, ref int references pk(id), u varchar unique)
+
+statement ok
+insert into pk values (1, null, 'a'), (1, 99, 'a')
+
+query
+select count(*) from pk
+----
+2
+
+query
+select 'a'::varchar(1), cast('2024-01-01' as datetime), 1::number(3,0), 'x'::char(5)
+----
+a|2024-01-01 00:00:00|1|x
+
+query
+select 1::byteint + 1, 3::decimal / 2, 1e0 + 1
+----
+2|1.500000|2
+
+statement ok
+create table lens (code char(3), name varchar(5), raw binary(4), at timestamp_tz)
+
+query
+select column_name, data_type, character_maximum_length from information_schema.columns where table_name = 'LENS' order by ordinal_position
+----
+CODE|TEXT|3
+NAME|TEXT|5
+RAW|BINARY|4
+AT|TIMESTAMP_TZ|NULL
+
+statement ok
+insert into lens (code, name) values ('abc', 'hello')
+
+error 100074
+insert into lens (name) values ('too long')
+
+statement ok
+alter table lens add column note varchar(2) comment 'short'
+
+statement ok
+desc table lens
+
+query
+select "name", "type", "comment" from table(result_scan(last_query_id())) order by "name"
+----
+AT|TIMESTAMP_TZ(9)|NULL
+CODE|VARCHAR(3)|NULL
+NAME|VARCHAR(5)|NULL
+NOTE|VARCHAR(2)|short
+RAW|BINARY(4)|NULL

@@ -1,0 +1,98 @@
+# SQL user-defined functions.
+
+query
+create or replace function add_one(x number) returns number language sql as 'x + 1'
+----
+Function ADD_ONE successfully created.
+
+query
+select add_one(41), add_one(null)
+----
+42|NULL
+
+statement ok
+create function area(w float, h float) returns float as $$ w * h $$
+
+query
+select area(2, 3.5)
+----
+7
+
+statement ok
+create or replace function greet(name varchar, greeting varchar default 'hello') returns varchar as 'greeting || '', '' || name'
+
+query
+select greet('ada'), greet('grace', 'hi')
+----
+hello, ada|hi, grace
+
+statement ok
+create or replace function half(n number(10,2)) returns number(10,4) as 'n / 2'
+
+query types
+select half(5)
+----
+NUMBER(*,4)
+2.5000
+
+statement ok
+create or replace table nums (n int)
+
+statement ok
+insert into nums values (1), (2), (3), (4)
+
+statement ok
+create or replace function evens(upto int) returns table (v int, label varchar) as 'select n, ''#'' || n from nums where n % 2 = 0 and n <= upto'
+
+query
+select v, label from table(evens(4)) order by v
+----
+2|#2
+4|#4
+
+query
+select count(*) from table(evens(2))
+----
+1
+
+query
+select n, add_one(n) * 2 from nums where add_one(n) > 3 order by n
+----
+3|8
+4|10
+
+statement ok
+create or replace function json_name(v variant) returns varchar as 'v:name::string'
+
+query
+select json_name(parse_json('{"name": "ada"}'))
+----
+ada
+
+statement ok
+create or replace function iff_null(x int) returns varchar as 'iff(x is null, ''none'', to_varchar(x))'
+
+query
+select iff_null(null), iff_null(7)
+----
+none|7
+
+query
+drop function add_one(number)
+----
+ADD_ONE successfully dropped.
+
+error 002140
+select add_one(1)
+
+statement ok
+drop function evens(int)
+
+statement ok
+drop function if exists nothing_here(int)
+
+error 002003
+drop function nothing_here(int)
+
+error 002040
+create function js(x float) returns float language javascript as 'return X;'

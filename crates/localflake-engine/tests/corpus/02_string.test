@@ -1,0 +1,147 @@
+# String functions and operators.
+
+query
+select upper('abc'), lower('ABC'), length('héllo'), len(''), char_length('ab')
+----
+ABC|abc|5|0|2
+
+query
+select substr('abcdef', 2, 3), substring('abcdef', -3), substr('abc', 5), left('abc', 2), right('abc', 2)
+----
+bcd|def|(empty)|ab|bc
+
+query
+select lpad('7', 3, '0'), rpad('ab', 4, '*'), lpad('abcd', 2), trim('  a '), ltrim('xxa', 'x'), rtrim('ayy', 'y')
+----
+007|ab**|ab|a|a|a
+
+query
+select replace('abc', 'b'), replace('abcb', 'b', 'X'), reverse('abc'), repeat('ab', 3), space(2) || '|'
+----
+ac|aXcX|cba|ababab|  |
+
+query
+select concat('a', 'b', 'c'), concat_ws('-', 'a', 'b'), 'a' || null, concat_ws('-', 'a', null), 'x' || 1
+----
+abc|a-b|NULL|NULL|x1
+
+query
+select position('b' in 'abc'), position('b', 'abcb', 3), charindex('z', 'abc'), contains('abc', 'b'), endswith('abc', 'bc')
+----
+2|4|0|true|true
+
+query
+select insert('abcdef', 2, 3, 'X'), translate('abc', 'ab', 'xy'), ascii('A'), chr(65), char(66), unicode('A')
+----
+aXef|xyc|65|A|B|65
+
+query
+select split('a,b,,c', ','), split_part('a-b-c', '-', -1), strtok_to_array('a b  c'), strtok('a.b.c', '.', 3)
+----
+["a","b","","c"]|c|["a","b","c"]|c
+
+query
+select regexp_count('abab', 'b'), regexp_instr('abc', 'c'), regexp_substr('a1b22', '[0-9]+', 1, 2), regexp_replace('a1b2', '[0-9]')
+----
+2|3|22|ab
+
+query
+select regexp_substr('KEY=val', '([A-Z]+)=(\\w+)', 1, 1, 'e', 2), regexp_like('ABC', 'abc', 'i'), rlike('abc', 'a.*'), 'abc' regexp 'b'
+----
+val|true|true|false
+
+query
+select editdistance('kitten', 'sitting'), soundex('Robert'), jarowinkler_similarity('dwayne', 'duane')
+----
+3|R163|84
+
+query
+select md5('a'), sha1('a'), sha2('a'), sha2('a', 512) like 'lf2%'
+----
+0cc175b9c0f1b6a831c399e269772661|86f7e437faa5a7fce15d1ddcb9eaeaea377667b8|ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb|false
+
+query
+select base64_encode('abc'), base64_decode_string('YWJj'), hex_encode('abc'), hex_decode_string('616263'), try_base64_decode_string('!!')
+----
+YWJj|abc|616263|abc|NULL
+
+query
+select 'abc' like 'a%', 'abc' ilike 'A_C', 'abc' not like 'b%', 'abc' like any ('x%', '%c'), 'abc' like all ('a%', '%c')
+----
+true|true|true|true|true
+
+query
+select 'abc' ilike any ('A%', 'z%'), 'a%c' like 'a!%c' escape '!'
+----
+true|true
+
+query
+select initcap('hello wORLD'), initcap('a-b c', '-'), lower(null), 'a' < 'b', 'B' < 'a'
+----
+Hello World|A-B c|NULL|true|true
+
+query
+select nullif('a', 'a'), coalesce(null, 'b'), uuid_string() regexp '[0-9a-f-]{36}', length(randstr(5, 1))
+----
+NULL|b|true|5
+
+query
+select parse_url('https://example.com:8080/a/b?x=1#frag'):host::string, parse_url('https://example.com/a?x=1'):parameters:x::string
+----
+example.com|1
+
+query
+select 'it''s', $$a'b$$, 'tab\there', 'back\\slash', length('nl\nx')
+----
+it's|a'b|tab	here|back\slash|4
+
+query
+select listagg(x, ', ') within group (order by x) from (values ('b'), ('a'), (null)) t(x)
+----
+a, b
+
+query
+select listagg(distinct x) within group (order by x) from (values ('a'), ('a'), ('b')) t(x)
+----
+ab
+
+query
+select collate('a', 'en-ci') = 'A', 'abc' between 'abb' and 'abd'
+----
+true|true
+
+query
+select compress('aaaaaaaaaa', 'zlib') is not null, strip_null_value(parse_json('null')) is null
+----
+true|true
+
+query
+select to_varchar(1.50), to_varchar(1.5::float), 123::varchar, true::varchar, to_char(-1), to_varchar(null)
+----
+1.50|1.5|123|true|-1|NULL
+
+query
+select concat('a', 1, true), 'abc' = 'ABC', 'abc' = 'abc ', length(trim(' ')) = 0
+----
+a1true|false|false|true
+
+query
+select decompress_string(compress('hello hello hello', 'zlib'), 'zlib'), decompress_string(compress('x', 'gzip'), 'gzip'), length(compress('aaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'deflate')) < 28
+----
+hello hello hello|x|true
+
+statement ok
+create table coll (name varchar collate 'en-ci')
+
+statement ok
+insert into coll values ('Ada'), ('ada'), ('Grace')
+
+query
+select count(*) from coll where name = 'ADA'
+----
+2
+
+query
+select 'Café' collate 'en-ai' = 'cafe', 'abc' collate 'en-ci' < 'ABD', collate('A', 'en-ci') = 'a', collate('x', 'en-ci')
+----
+false|true|true|x

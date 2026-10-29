@@ -1,0 +1,9 @@
+[package]
+name = "localflake-sql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sqlparser.workspace = true
+thiserror.workspace = true

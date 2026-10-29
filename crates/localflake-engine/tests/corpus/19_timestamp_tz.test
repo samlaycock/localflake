@@ -1,0 +1,79 @@
+# TIMESTAMP_TZ keeps each value's own UTC offset.
+
+statement ok
+alter session set timezone = 'America/Los_Angeles'
+
+query types
+select '2024-03-15 10:11:12 +02:00'::timestamp_tz
+----
+TIMESTAMP_TZ
+2024-03-15 10:11:12 +0200
+
+query
+select '2024-03-15 10:11:12 +02:00'::timestamp_tz::timestamp_ntz, hour('2024-03-15 10:11:12 +02:00'::timestamp_tz), '2024-03-15 23:30:00 +02:00'::timestamp_tz::date
+----
+2024-03-15 10:11:12|10|2024-03-15
+
+query
+select to_varchar('2024-03-15 10:11:12.5 -08:00'::timestamp_tz), to_timestamp_tz('2024-07-01 09:00')
+----
+2024-03-15 10:11:12.500 -0800|2024-07-01 09:00:00 -0700
+
+statement ok
+create or replace table events (id int, at timestamp_tz)
+
+statement ok
+insert into events values (1, '2024-01-01 09:00:00 -05:00'), (2, '2024-01-01 12:00:00'), (3, '2024-01-01 15:00:00 +01:00')
+
+query
+select id, at from events order by at, id
+----
+1|2024-01-01 09:00:00 -0500
+3|2024-01-01 15:00:00 +0100
+2|2024-01-01 12:00:00 -0800
+
+query
+select id, at::timestamp_ltz = '2024-01-01 14:00:00 +00:00'::timestamp_ltz from events order by id
+----
+1|true
+2|false
+3|true
+
+query
+select convert_timezone('Asia/Tokyo', '2024-01-01 00:00:00 +00:00'::timestamp_tz), convert_timezone('UTC', '2024-03-15 10:11:12 +02:00'::timestamp_tz)::timestamp_ntz
+----
+2024-01-01 09:00:00 +0900|2024-03-15 08:11:12
+
+query types
+select date_trunc('day', '2024-03-15 23:30:00 +02:00'::timestamp_tz), dateadd(hour, 1, '2024-03-15 23:30:00 +02:00'::timestamp_tz)
+----
+TIMESTAMP_TZ|TIMESTAMP_TZ
+2024-03-15 00:00:00 +0200|2024-03-16 00:30:00 +0200
+
+query
+select datediff(minute, '2024-01-01 10:00:00 +00:00'::timestamp_tz, '2024-01-01 12:30:00 +02:00'::timestamp_tz)
+----
+30
+
+query
+select '2024-07-01 12:00:00'::timestamp_ntz::timestamp_tz, '2024-07-01'::date::timestamp_tz
+----
+2024-07-01 12:00:00 -0700|2024-07-01 00:00:00 -0700
+
+statement ok
+alter session set timestamp_type_mapping = 'TIMESTAMP_TZ'
+
+query types
+select '2024-01-01 00:00:00 +05:30'::timestamp
+----
+TIMESTAMP_TZ
+2024-01-01 00:00:00 +0530
+
+statement ok
+alter session unset timestamp_type_mapping
+
+query
+select column_name, data_type from information_schema.columns where table_name = 'EVENTS' order by ordinal_position
+----
+ID|NUMBER
+AT|TIMESTAMP_TZ

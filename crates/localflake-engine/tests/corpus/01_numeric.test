@@ -1,0 +1,99 @@
+# Numeric literals, arithmetic and numeric functions.
+
+query types
+select 1, 1.5, 1e2, -7
+----
+NUMBER(*,0)|NUMBER(*,1)|FLOAT|NUMBER(*,0)
+1|1.5|100|-7
+
+query
+select 10 / 4, 1 / 3 * 3, 0.1 + 0.2, 7 % 3, mod(-7, 3)
+----
+2.500000|0.999999|0.3|1|-1
+
+query
+select round(2.5), round(-2.5), round(1.2345, 2), round(1234.5, -2)
+----
+3|-3|1.23|1200
+
+query
+select trunc(1.99), truncate(-1.99), ceil(1.1), floor(-1.1), ceil(1.234, 1)
+----
+1|-1|2|-2|1.3
+
+query
+select abs(-3), sign(-2), sign(0), sqrt(16), power(2, 10), pow(2, 0.5) > 1.41
+----
+3|-1|0|4|1024|true
+
+query
+select exp(0), ln(1), log(10, 100), square(3), cbrt(27), factorial(5)
+----
+1|0|2|9|3|120
+
+query
+select div0(1, 0), div0null(1, null), nullifzero(0), zeroifnull(null), 7 / nullif(0, 0)
+----
+0.000000|0.000000|NULL|0|NULL
+
+error 100051
+select 1 / 0
+
+query
+select greatest(1, 5, 3), least(4, 2, 8), greatest('a', 'b')
+----
+5|2|b
+
+query
+select bitand(12, 10), bitor(12, 10), bitxor(12, 10), bitnot(0), bitshiftleft(1, 4), bitshiftright(16, 2)
+----
+8|14|6|-1|16|4
+
+query
+select width_bucket(5.35, 0.024, 10.06, 5)
+----
+3
+
+query
+select cast(3.789 as int), '3.7'::int, '-2.5'::number, cast(10 as number(5,2)), 12.345::number(10,1)
+----
+4|4|-3|10.00|12.3
+
+query
+select to_number('12.3', 10, 1), to_decimal('42'), to_numeric('1.239', 10, 2), try_to_number('abc')
+----
+12.3|42|1.24|NULL
+
+error 100038
+select 'abc'::number
+
+query
+select pi() > 3.14 and pi() < 3.15, degrees(pi()), radians(180) = pi()
+----
+true|180|true
+
+query
+select sin(0), cos(0), tan(0), atan2(0, 1), asin(0)
+----
+0|1|0|0|0
+
+query
+select 5::float / 2, 1.5::float * 2, 'NaN'::float = 'NaN'::float
+----
+2.5|3|true
+
+query
+select haversine(0, 0, 0, 0)
+----
+0
+
+query
+select 9007199254740993 + 1, 99999999999999999999999999999999999999
+----
+9007199254740994|99999999999999999999999999999999999999
+
+query types
+select 1 + 1.5, 2 * 2.25, sum(x) from (select 1 as x)
+----
+NUMBER(*,1)|NUMBER(*,2)|NUMBER(*,0)
+2.5|4.50|1

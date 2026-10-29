@@ -1,0 +1,151 @@
+# INSERT, UPDATE, DELETE, MERGE and multi-table inserts.
+
+statement ok
+create table target (id int, v varchar, n int)
+
+statement ok
+create table source (id int, v varchar, op varchar)
+
+statement ok
+insert into target values (1, 'a', 0), (2, 'b', 0), (3, 'c', 0)
+
+statement ok
+insert into source values (1, 'A', 'upd'), (2, 'B', 'del'), (4, 'D', 'ins')
+
+query
+merge into target t using source s on t.id = s.id
+when matched and s.op = 'del' then delete
+when matched then update set v = s.v, n = t.n + 1
+when not matched then insert (id, v, n) values (s.id, s.v, 9)
+----
+1|1|1
+
+query
+select * from target order by id
+----
+1|A|1
+3|c|0
+4|D|9
+
+query
+merge into target t using (select 3 as id) s on t.id = s.id when matched then update set n = 100
+----
+1
+
+query
+update target set v = s.v from source s where target.id = s.id and s.op = 'ins'
+----
+1|0
+
+query
+delete from target using source s where target.id = s.id and s.op = 'upd'
+----
+1
+
+query
+select id, v, n from target order by id
+----
+3|c|100
+4|D|9
+
+query
+insert into target (id) select seq4() + 10 from table(generator(rowcount => 3))
+----
+3
+
+query
+select count(*), max(id), count(v) from target
+----
+5|12|2
+
+query
+update target set n = default where id >= 10
+----
+3|0
+
+statement ok
+create table t_a (x int)
+
+statement ok
+create table t_b (x int)
+
+query
+insert all into t_a into t_b values (x) select 1 as x union all select 2
+----
+2|2
+
+query
+insert first when x > 1 then into t_a else into t_b select 5 as x union all select 0
+----
+1|1
+
+query
+select (select count(*) from t_a), (select count(*) from t_b)
+----
+3|3
+
+query
+insert all when x = 5 then into t_a (x) values (x * 10) select 5 as x
+----
+1
+
+query
+select max(x) from t_a
+----
+50
+
+query
+insert overwrite into t_b select 7
+----
+1
+
+query
+select * from t_b
+----
+7
+
+query
+delete from t_a
+----
+4
+
+statement ok
+create table d (id int, ts timestamp_ntz default current_timestamp(), flag boolean default true, s varchar default 'x')
+
+statement ok
+insert into d (id) values (1)
+
+query
+select id, ts is not null, flag, s from d
+----
+1|true|true|x
+
+query
+insert into d values (2, '2024-01-01', false, null), (3, '2024-01-02 03:04:05', null, 'y')
+----
+2
+
+query
+select id, ts, flag, s from d where id > 1 order by id
+----
+2|2024-01-01 00:00:00|false|NULL
+3|2024-01-02 03:04:05|NULL|y
+
+statement ok
+truncate table if exists d
+
+query
+select count(*) from d
+----
+0
+
+statement ok
+create table nn (id int not null)
+
+error 100072
+insert into nn (id) values (null), (1)
+
+query
+select count(*) from nn
+----
+0

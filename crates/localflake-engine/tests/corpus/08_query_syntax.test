@@ -1,0 +1,274 @@
+# SELECT syntax: joins, set operations, CTEs, PIVOT, CONNECT BY, star modifiers.
+
+statement ok
+create table emp (id int, name varchar, mgr int, dept varchar, salary int)
+
+statement ok
+insert into emp values (1, 'ceo', null, 'exec', 300), (2, 'vp', 1, 'eng', 200), (3, 'dev1', 2, 'eng', 100), (4, 'dev2', 2, 'eng', 110), (5, 'cfo', 1, 'fin', 250)
+
+statement ok
+create table dept (dept varchar, title varchar)
+
+statement ok
+insert into dept values ('eng', 'Engineering'), ('fin', 'Finance'), ('ops', 'Operations')
+
+query rowsort
+select e.name, d.title from emp e join dept d on e.dept = d.dept where e.salary > 150
+----
+cfo|Finance
+vp|Engineering
+
+query rowsort
+select d.title, count(e.id) from dept d left join emp e using (dept) group by d.title
+----
+Engineering|3
+Finance|1
+Operations|0
+
+query rowsort
+select name, title from emp natural join dept where salary < 120
+----
+dev1|Engineering
+dev2|Engineering
+
+query
+select count(*) from emp e full outer join dept d on e.dept = d.dept
+----
+6
+
+query
+select count(*) from emp cross join dept
+----
+15
+
+query rowsort
+select e.name, m.name from emp e left join emp m on e.mgr = m.id where e.dept = 'eng'
+----
+dev1|vp
+dev2|vp
+vp|ceo
+
+query rowsort
+select dept from emp union select dept from dept
+----
+eng
+exec
+fin
+ops
+
+query
+select count(*) from (select dept from emp union all select dept from dept)
+----
+8
+
+query rowsort
+select dept from emp intersect select dept from dept
+----
+eng
+fin
+
+query rowsort
+select dept from dept minus select dept from emp
+----
+ops
+
+query rowsort
+select dept from dept except select dept from emp
+----
+ops
+
+query rowsort
+select 1 as a, 2 as b union all by name select 4 as b, 3 as a
+----
+1|2
+3|4
+
+query
+with recursive chain (id, name, depth) as (
+  select id, name, 0 from emp where mgr is null
+  union all
+  select e.id, e.name, c.depth + 1 from emp e join chain c on e.mgr = c.id
+)
+select max(depth), count(*) from chain
+----
+2|5
+
+query rowsort
+select name, level, sys_connect_by_path(name, '/') from emp start with mgr is null connect by prior id = mgr
+----
+ceo|1|/ceo
+cfo|2|/ceo/cfo
+dev1|3|/ceo/vp/dev1
+dev2|3|/ceo/vp/dev2
+vp|2|/ceo/vp
+
+query rowsort
+select name, connect_by_root name from emp start with id = 2 connect by mgr = prior id
+----
+dev1|vp
+dev2|vp
+vp|vp
+
+query
+select * from (select dept, salary from emp) pivot (sum(salary) for dept in ('eng', 'fin', 'exec')) order by 1
+----
+410|250|300
+
+query rowsort
+select * from (select 'a' as k, 1 as x, 2 as y) unpivot (val for col in (x, y))
+----
+a|X|1
+a|Y|2
+
+query
+select * exclude (mgr, dept) from emp where id = 1
+----
+1|ceo|300
+
+query
+select * rename (name as who) from emp where id = 1
+----
+1|ceo|NULL|exec|300
+
+query
+select * replace (salary * 2 as salary) from emp where id = 1
+----
+1|ceo|NULL|exec|600
+
+query
+select * ilike '%a%' from emp where id = 1
+----
+ceo|300
+
+query
+select e.* exclude salary, d.title from emp e join dept d using (dept) where e.id = 5
+----
+5|cfo|1|fin|Finance
+
+query
+select name from emp order by salary desc limit 2 offset 1
+----
+cfo
+vp
+
+query
+select name from emp order by salary desc fetch first 1 rows only
+----
+ceo
+
+query
+select top 2 name from emp order by id
+----
+ceo
+vp
+
+query
+select $1, $2 from values (1, 'a'), (2, 'b') order by $1 desc
+----
+2|b
+1|a
+
+query
+select salary * 2 as double_pay, double_pay + 1 from emp where id = 3
+----
+200|201
+
+query
+select name, salary as pay from emp where pay > 260
+----
+ceo|300
+
+query rowsort
+select dept as d, count(*) from emp group by d having count(*) > 1
+----
+eng|3
+
+query
+select name from emp where salary > all (select salary from emp where dept = 'eng') order by 1
+----
+ceo
+cfo
+
+query
+select name from emp where salary = any (select 100 union select 110) order by 1
+----
+dev1
+dev2
+
+query
+select name from emp e where exists (select 1 from emp r where r.mgr = e.id) order by 1
+----
+ceo
+vp
+
+query
+select name, (select title from dept d where d.dept = e.dept) from emp e where id = 2
+----
+vp|Engineering
+
+query
+select count(*) from emp sample (100)
+----
+5
+
+query
+select count(*) from emp tablesample bernoulli (0)
+----
+0
+
+query
+select name from emp where name ilike any ('C%', 'v%') order by name
+----
+ceo
+cfo
+vp
+
+query
+select id, name from emp order by mgr nulls first, id limit 2
+----
+1|ceo
+2|vp
+
+query
+select name from emp order by name desc nulls last limit 1
+----
+vp
+
+query
+select count(*) from identifier('emp')
+----
+5
+
+query
+select distinct dept from emp order by dept
+----
+eng
+exec
+fin
+
+query rowsort
+select t.x, s.v from (values (1), (2)) t(x), lateral (select t.x * 10 as v) s
+----
+1|10
+2|20
+
+query rowsort
+select e.name, d.title from emp e asof join (select 'eng' as dept, 150 as salary, 'mid' as title union all select 'eng', 50, 'low') d match_condition (e.salary >= d.salary) on e.dept = d.dept
+----
+ceo|NULL
+cfo|NULL
+dev1|low
+dev2|low
+vp|mid
+
+query
+select seq4(), seq8() from table(generator(rowcount => 3)) order by 1
+----
+0|0
+1|1
+2|2
+
+query
+select count(*) from table(generator(rowcount => 10)) where uniform(1, 10, random()) between 1 and 10
+----
+10

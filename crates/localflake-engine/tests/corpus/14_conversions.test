@@ -1,0 +1,109 @@
+# Implicit and explicit conversions to and from text, with Snowflake's default
+# output formats.
+
+query
+select to_varchar('2024-01-02 03:04:05'::timestamp_ntz), '2024-01-02 03:04:05.123456'::timestamp_ntz::varchar, to_varchar('2024-01-02'::date), to_varchar('03:04:05'::time)
+----
+2024-01-02 03:04:05.000|2024-01-02 03:04:05.123|2024-01-02|03:04:05
+
+query
+select 'at ' || '2024-01-02 03:04:05'::timestamp_ntz, 'on ' || '2024-01-02'::date, concat('t=', '03:04:05'::time)
+----
+at 2024-01-02 03:04:05.000|on 2024-01-02|t=03:04:05
+
+statement ok
+alter session set timestamp_ntz_output_format = 'YYYY-MM-DD HH24:MI'
+
+query
+select to_varchar('2024-01-02 03:04:05'::timestamp_ntz)
+----
+2024-01-02 03:04
+
+statement ok
+alter session unset timestamp_ntz_output_format
+
+statement ok
+alter session set date_output_format = 'DD/MM/YYYY'
+
+query
+select to_varchar('2024-01-02'::date)
+----
+02/01/2024
+
+statement ok
+alter session unset date_output_format
+
+query
+select to_varchar(1.50), to_varchar(-0.5), to_varchar(100::number(10,2)), to_varchar(1e20::float), to_varchar(0.1::float + 0.2::float), to_varchar(1::float)
+----
+1.50|-0.5|100.00|1e+20|0.30000000000000004|1
+
+query
+select to_varchar(true), false::varchar, to_varchar(null), to_varchar(to_binary('ab', 'utf-8')), to_varchar(parse_json('{"a": [1, "x"]}'))
+----
+true|false|NULL|6162|{"a":[1,"x"]}
+
+query
+select '10' > 9, '10' > '9', 10 = '10', '1.0' = 1, '2024-01-01' < current_date()
+----
+true|false|true|true|true
+
+query
+select '5' + 1, -'2', 2 || 3
+----
+6|-2|23
+
+query types
+select 1 + 1.0, 1 + 1::float, 1::float + 1.5
+----
+NUMBER(*,1)|FLOAT|FLOAT
+2.0|2|2.5
+
+query
+select cast('  42  ' as int), '1e2'::int, '0x10'::varchar, to_number('  7 ')
+----
+42|100|0x10|7
+
+error 100038
+select cast('4 2' as int)
+
+query
+select '2024-01-02'::date + 1, dateadd(day, 1, '2024-01-02'), '2024-01-02'::timestamp + interval '1 hour'
+----
+2024-01-03|2024-01-03 00:00:00|2024-01-02 01:00:00
+
+query
+select '02-Jan-2024'::date, '01/02/2024'::date, '2024-01-02T03:04:05.123Z'::timestamp_ntz
+----
+2024-01-02|2024-01-02|2024-01-02 03:04:05.123
+
+query
+select to_timestamp('1704164645'), to_timestamp('1704164645123'), to_timestamp(1704164645123456, 6), to_date('1704164645')
+----
+2024-01-02 03:04:05|2024-01-02 03:04:05.123|2024-01-02 03:04:05.123456|2024-01-02
+
+query
+select 1::boolean, 0::boolean, 'TRUE'::boolean, ' yes '::boolean, true::int, false::number
+----
+true|false|true|true|1|0
+
+query
+select array_construct(1, 2)::varchar, object_construct('a', 1)::varchar, parse_json('1.5')::number(10,1), parse_json('"7"')::int
+----
+[1,2]|{"a":1}|1.5|7
+
+query
+select parse_json('12345678901234567890'), parse_json('0.1')::float, parse_json('[1,2]')::array, to_array('a')
+----
+12345678901234567890|0.1|[1,2]|["a"]
+
+query
+select coalesce(1, 1.5), coalesce('a', 1::varchar), nvl(null, 2.25)
+----
+1.0|a|2.25
+
+query types
+select iff(true, 1, 1.5), case when true then 1 else 2.25 end, greatest(1, 2.5), coalesce(1::float, 2)
+----
+NUMBER(*,1)|NUMBER(*,2)|NUMBER(*,1)|FLOAT
+1.0|1.00|2.5|1

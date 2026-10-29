@@ -1,0 +1,7 @@
+/target
+/tests/python/.venv
+__pycache__/
+.pytest_cache/
+*.duckdb
+*.duckdb.wal
+/tests/node/node_modules

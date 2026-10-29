@@ -1,0 +1,15 @@
+[project]
+name = "localflake-e2e"
+version = "0.0.0"
+description = "End-to-end tests driving localflake with the official Snowflake Python connector"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8",
+    "snowflake-connector-python>=3",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+addopts = "-ra"

@@ -1,0 +1,158 @@
+# Application-style queries combining features.
+
+statement ok
+create or replace table orders (id int, customer varchar, placed_at timestamp_ntz, status varchar, total number(12,2), payload variant)
+
+statement ok
+insert into orders select 1, 'ada', '2024-01-05 10:00', 'shipped', 120.50, parse_json('{"items": [{"sku": "a", "qty": 2}, {"sku": "b", "qty": 1}], "coupon": "NEW"}')
+
+statement ok
+insert into orders select 2, 'ada', '2024-02-10 12:30', 'pending', 80.00, parse_json('{"items": [{"sku": "a", "qty": 1}]}')
+
+statement ok
+insert into orders select 3, 'grace', '2024-02-11 09:15', 'shipped', 42.25, parse_json('{"items": [], "coupon": null}')
+
+statement ok
+insert into orders select 4, 'linus', '2024-03-01 00:00', 'cancelled', 0, null
+
+query
+select date_trunc('month', placed_at)::date as month, count(*) as orders, sum(total) as revenue from orders where status <> 'cancelled' group by 1 order by 1
+----
+2024-01-01|1|120.50
+2024-02-01|2|122.25
+
+query
+select customer, count(*) as n, round(avg(total), 2) as avg_total, max(placed_at) as last_order from orders group by customer order by n desc, customer
+----
+ada|2|100.25|2024-02-10 12:30:00
+grace|1|42.25|2024-02-11 09:15:00
+linus|1|0.00|2024-03-01 00:00:00
+
+query
+select o.id, i.value:sku::string as sku, i.value:qty::int as qty from orders o, lateral flatten(input => o.payload:items) i order by o.id, sku
+----
+1|a|2
+1|b|1
+2|a|1
+
+query
+select i.value:sku::string as sku, sum(i.value:qty::int) as units from orders o, lateral flatten(o.payload:items) i group by sku order by units desc
+----
+a|3
+b|1
+
+query
+select id, payload:coupon::string as coupon, coalesce(payload:coupon::string, 'none') as coupon_or_none from orders order by id
+----
+1|NEW|NEW
+2|NULL|none
+3|NULL|none
+4|NULL|none
+
+query
+select id, array_size(payload:items) as item_count from orders where array_size(payload:items) > 0 order by id
+----
+1|2
+2|1
+
+query
+with monthly as (
+  select date_trunc('month', placed_at) as m, sum(total) as revenue from orders group by 1
+)
+select to_char(m, 'YYYY-MM') as month, revenue, lag(revenue) over (order by m) as prev, revenue - lag(revenue) over (order by m) as delta from monthly order by m
+----
+2024-01|120.50|NULL|NULL
+2024-02|122.25|120.50|1.75
+2024-03|0.00|122.25|-122.25
+
+query
+select customer, id, total, sum(total) over (partition by customer order by placed_at rows between unbounded preceding and current row) as running from orders where customer = 'ada' order by placed_at
+----
+ada|1|120.50|120.50
+ada|2|80.00|200.50
+
+query
+select customer, listagg(id::varchar, ',') within group (order by id) as ids, array_agg(status) within group (order by id) as statuses from orders group by customer order by customer
+----
+ada|1,2|["shipped","pending"]
+grace|3|["shipped"]
+linus|4|["cancelled"]
+
+query
+select status, count_if(total > 50) as big, count(*) as all_orders, div0(count_if(total > 50), count(*)) as share from orders group by status order by status
+----
+cancelled|0|1|0.000000
+pending|1|1|1.000000
+shipped|1|2|0.500000
+
+query
+select id from orders where placed_at between '2024-02-01' and '2024-02-29 23:59:59' order by id
+----
+2
+3
+
+query
+select id, datediff(day, placed_at, '2024-03-01'::timestamp) as age_days, iff(age_days > 30, 'old', 'recent') as bucket from orders order by id
+----
+1|56|old
+2|20|recent
+3|19|recent
+4|0|recent
+
+query
+select object_construct('id', id, 'customer', customer, 'total', total) as doc from orders where id = 3
+----
+{"customer":"grace","id":3,"total":42.25}
+
+query
+select customer from orders group by customer having sum(total) > 100 and count(*) > 1
+----
+ada
+
+query
+select id, status, case status when 'shipped' then 1 when 'pending' then 2 else 3 end as rank from orders order by rank, id
+----
+1|shipped|1
+3|shipped|1
+2|pending|2
+4|cancelled|3
+
+statement ok
+update orders set status = 'shipped', payload = object_insert(payload, 'shipped_at', '2024-02-12') where id = 2
+
+query
+select status, payload:shipped_at::date from orders where id = 2
+----
+shipped|2024-02-12
+
+statement ok
+delete from orders where total = 0
+
+query
+select count(*), sum(total) from orders
+----
+3|242.75
+
+statement ok
+create or replace table daily as select dateadd(day, seq4(), '2024-01-01'::date) as d from table(generator(rowcount => 10))
+
+query
+select count(*), min(d), max(d) from daily
+----
+10|2024-01-01|2024-01-10
+
+query
+select d, dayname(d) from daily where dayofweekiso(d) >= 6 order by d
+----
+2024-01-06|Sat
+2024-01-07|Sun
+
+query
+select year(d) * 100 + month(d) as ym, count(*) from daily group by ym
+----
+202401|10
+
+query
+select d::varchar || ' (' || dayname(d) || ')' from daily where d = '2024-01-01'
+----
+2024-01-01 (Mon)

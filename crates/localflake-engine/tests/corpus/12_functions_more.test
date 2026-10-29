@@ -1,0 +1,216 @@
+# More scalar functions.
+
+query
+select to_char(1234.5, '9,999.99'), to_char(0.5, '0.00'), to_char(42, '000'), to_varchar(12.3456, '99.99')
+----
+ 1,234.50| 0.50| 042| 12.35
+
+query
+select to_number('1,234.50', '9,999.99'), to_decimal('-12.5', 10, 1), to_number('$12', '$99')
+----
+1235|-12.5|12
+
+query
+select try_to_decimal('12.345', 10, 2), try_to_number('1e3'), try_cast('1.5' as number(10,1)), try_to_double('x')
+----
+12.35|1000|1.5|NULL
+
+query
+select ifnull(null, 'a'), nvl(1, 2), coalesce(null, null), nullif(null, 1)
+----
+a|1|NULL|NULL
+
+query
+select abs(-1.5), mod(10, 3), mod(10.5, 3), floor(-0.5), ceil(-0.5), round(-0.5), round(0.125, 2)
+----
+1.5|1|1.5|-1|0|-1|0.13
+
+query
+select round(2.5, 0, 'HALF_TO_EVEN'), round(3.5, 0, 'HALF_TO_EVEN'), round(-2.5, 0, 'HALF_AWAY_FROM_ZERO')
+----
+2|4|-3
+
+query
+select round(ln(exp(2)), 6), round(log(2, 8), 6), exp(1) > 2.71, sqrt(2) * sqrt(2) between 1.99 and 2.01
+----
+2|3|true|true
+
+query
+select hash(1) = hash(1), hash('a') <> hash('b'), hash(null) is not null, typeof(hash(1)::variant)
+----
+true|true|true|INTEGER
+
+query
+select left('abc', 0), right('abc', 5), substr('abc', 0), substr('abc', 2), substring('abcdef', 2, 2)
+----
+(empty)|abc|abc|bc|bc
+
+query
+select lpad('abc', 6, 'xy'), rpad('abc', 2, 'x'), lpad(null, 3, 'x'), repeat('-', 0)
+----
+xyxabc|ab|NULL|(empty)
+
+query
+select trim('xxaxx', 'x'), ltrim('  a'), rtrim('a  ') || '|'
+----
+a|a|a|
+
+query
+select split_part('a.b.c', '.', 0), split_part('a.b.c', '.', 4), split_part('abc', '', 1)
+----
+a|(empty)|abc
+
+query
+select strtok('a.b', '.', 5), strtok('', '.'), regexp_replace('aaa', 'a', 'b', 2), regexp_replace('abc', '(b)', '[\\1]')
+----
+NULL|NULL|abb|a[b]c
+
+query
+select regexp_count('aAa', 'a', 1, 'i'), regexp_substr('one two three', '\\w+', 1, 3), regexp_instr('one two', 'two', 1, 1, 1)
+----
+3|three|8
+
+query
+select contains('abc', ''), startswith('abc', ''), position('', 'abc'), charindex('c', 'abc', 10)
+----
+true|true|1|0
+
+query
+select lower('ÀÉÎ'), length('😀'), reverse('añb')
+----
+àéî|1|bña
+
+query
+select ascii(''), chr(0) = chr(0), ascii('😀') > 0
+----
+0|true|true
+
+query
+select concat_ws(',', 'a', 'b', 'c'), concat('a'), 'a' || 'b' || 'c', 1 || 2
+----
+a,b,c|a|abc|12
+
+query
+select replace('a.b.c', '.', ''), replace('abc', '', 'x'), replace(null, 'a', 'b')
+----
+abc|abc|NULL
+
+query
+select translate('abcabc', 'abc', 'x'), translate('hello', 'l', '')
+----
+xx|heo
+
+query
+select iff(true, 1, 2.5), iff(false, 'a', null), case when null then 1 else 2 end
+----
+1.0|NULL|2
+
+query
+select decode(1, 1, 'a'), decode(2, 1, 'a', 'z'), decode('x', 'X', 'upper', 'lower')
+----
+a|z|lower
+
+query
+select greatest(1, 2.5), least('b', 'a', 'c'), greatest(null, 1), least(1, null)
+----
+2.5|a|NULL|NULL
+
+query
+select try_to_date('2024-01-15'), try_to_date('15.01.2024', 'DD.MM.YYYY'), to_date('2024-01-15T10:00:00')
+----
+2024-01-15|2024-01-15|2024-01-15
+
+query
+select to_timestamp(19737), to_time('10:11:12.5')
+----
+1970-01-01 05:28:57|10:11:12.5
+
+query
+select date_part(dow, '2024-03-17'::date), date_part(doy, '2024-12-31'::date), date_part(week, '2024-12-30'::date), date_part(yearofweek, '2024-12-30'::date)
+----
+0|366|1|2025
+
+query
+select dateadd(day, 1, '2024-01-01 10:00'::timestamp), dateadd(minute, 90, '10:00:00'::time), dateadd(month, 1, '2024-01-31 12:00'::timestamp)
+----
+2024-01-02 10:00:00|11:30:00|2024-02-29 12:00:00
+
+query
+select datediff(second, '10:00:00'::time, '10:01:30'::time), datediff(day, '2024-01-01 23:59'::timestamp, '2024-01-02 00:01'::timestamp), datediff(year, '2024-12-31'::date, '2023-01-01'::date)
+----
+90|1|-1
+
+query
+select timediff(minute, '2024-01-01 10:00'::timestamp, '2024-01-01 12:30'::timestamp), timestampdiff(month, '2024-01-15'::date, '2024-03-14'::date)
+----
+150|2
+
+query
+select last_day('2024-02-15'::date, 'week'), date_trunc('day', '2024-03-15 10:11:12'::timestamp), date_trunc('year', '2024-03-15'::date)
+----
+2024-02-18|2024-03-15 00:00:00|2024-01-01
+
+query
+select year('2024-03-15 10:00'::timestamp), month('2024-03-15'::date), quarter('2024-11-01'::date), yearofweek('2024-12-30'::date), dayofweek('2024-03-16'::date)
+----
+2024|3|4|2025|6
+
+query
+select to_char('2024-03-05 08:09:10.123'::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.FF3'), to_char('2024-03-05'::date, 'DD/MM/YY'), to_char('2024-03-05'::date, 'Dy, Mon DD')
+----
+2024-03-05T08:09:10.123|05/03/24|Tue, Mar 05
+
+query
+select array_size(split('', ',')), split(null, ','), array_size(array_construct())
+----
+1|NULL|0
+
+query
+select object_construct('a', 1)['a'], object_construct('a', object_construct('b', 2)):a.b, parse_json('{"a": [1, 2]}'):a[1]
+----
+1|2|2
+
+query
+select to_variant('x')::string, to_variant(1)::int + 1, parse_json('"2024-01-01"')::date, parse_json('true')::boolean
+----
+x|2|2024-01-01|true
+
+query
+select array_to_string(array_construct('a', 'b'), ''), array_cat(array_construct(1), array_construct()), array_slice(array_construct(1, 2, 3), -2, 10)
+----
+ab|[1]|[2,3]
+
+query
+select arrays_overlap(array_construct(1), array_construct(2)), array_contains(3::variant, array_construct(1, 2)), array_position('b'::variant, array_construct('a', 'b'))
+----
+false|false|1
+
+query
+select object_keys(object_construct()), array_size(object_keys(parse_json('{"a":1,"b":2}')))
+----
+[]|2
+
+query
+select uuid_string(uuid_string(), 'name') is not null, length(uuid_string()), uuid_string() <> uuid_string()
+----
+true|36|true
+
+query
+select zeroifnull(1.5), nullifzero(0.0), div0(-1, 0), 0 / 1
+----
+1.5|NULL|0.000000|0.000000
+
+query
+select bitand(5, 3), bitor(5, 3), bitxor(5, 3), bit_length('ab'), octet_length('é')
+----
+1|7|6|16|2
+
+query
+select regr_avgx(y, x), regr_avgy(y, x), regr_r2(y, x), regr_sxx(y, x) from (values (1, 2), (2, 4), (3, 6)) t(x, y)
+----
+2|4|1|2
+
+query
+select regexp_replace('a1b2c3', '[0-9]', 'X', 1, 2), regexp_replace('a1b2c3', '[0-9]', 'X', 3, 2), regexp_replace('aAaA', 'a', '-', 1, 3, 'i'), regexp_replace('k=v k=w', '(\\w)=(\\w)', '\\2=\\1', 1, 2)
+----
+a1bXc3|a1b2cX|aA-A|k=v w=k

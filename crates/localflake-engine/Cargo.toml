@@ -1,0 +1,25 @@
+[package]
+name = "localflake-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+localflake-sql.workspace = true
+arrow-array.workspace = true
+arrow-ipc.workspace = true
+base64.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+duckdb.workspace = true
+flate2.workspace = true
+md5.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+flate2.workspace = true

@@ -1,0 +1,72 @@
+# Session time zones and TIMESTAMP_LTZ. Snowflake's default TIMEZONE is
+# America/Los_Angeles. (Needs DuckDB's ICU extension; see the README.)
+
+statement ok
+show parameters like 'TIMEZONE' in session
+
+query
+select "value" from table(result_scan(last_query_id()))
+----
+America/Los_Angeles
+
+query
+select hour('2024-07-01 12:00:00 +00:00'::timestamp_ltz), '2024-01-15 12:00:00 +00:00'::timestamp_ltz::timestamp_ntz
+----
+5|2024-01-15 04:00:00
+
+statement ok
+alter session set timezone = 'America/New_York'
+
+query
+select '2024-07-01 12:00:00 +00:00'::timestamp_ltz::timestamp_ntz, hour('2024-07-01 12:00:00 +00:00'::timestamp_ltz), '2024-07-01 02:00:00 +00:00'::timestamp_ltz::date
+----
+2024-07-01 08:00:00|8|2024-06-30
+
+query
+select '2024-07-01 12:00:00'::timestamp_ltz = '2024-07-01 16:00:00 +00:00'::timestamp_ltz, '2024-07-01'::date::timestamp_ltz = '2024-07-01 04:00:00 +00:00'::timestamp_ltz
+----
+true|true
+
+query
+select to_varchar('2024-01-15 12:00:00 +00:00'::timestamp_ltz), to_varchar('2024-07-15 12:00:00 +00:00'::timestamp_ltz)
+----
+2024-01-15 07:00:00.000 -0500|2024-07-15 08:00:00.000 -0400
+
+query
+select dateadd(day, 1, '2024-03-09 12:00:00'::timestamp_ltz)::timestamp_ntz, datediff(hour, '2024-03-10 00:00:00'::timestamp_ltz, '2024-03-11 00:00:00'::timestamp_ltz)
+----
+2024-03-10 12:00:00|23
+
+query
+select date_trunc('day', '2024-07-01 02:00:00 +00:00'::timestamp_ltz)::timestamp_ntz, to_timestamp_ltz('2024-07-01 09:30')::timestamp_ntz
+----
+2024-06-30 00:00:00|2024-07-01 09:30:00
+
+query
+select '2024-07-01 12:00:00'::timestamp_ntz::timestamp_ltz = '2024-07-01 16:00:00 +00:00'::timestamp_ltz, to_timestamp_ltz(0) = '1970-01-01 00:00:00 +00:00'::timestamp_ltz
+----
+true|true
+
+query
+select abs(datediff(minute, sysdate(), current_timestamp()::timestamp_ntz)) between 230 and 310
+----
+true
+
+statement ok
+alter session set timezone = 'UTC'
+
+query
+select '2024-07-01 12:00:00 +02:00'::timestamp_ltz::timestamp_ntz, to_varchar('2024-07-01 12:00:00 +00:00'::timestamp_ltz)
+----
+2024-07-01 10:00:00|2024-07-01 12:00:00.000 +0000
+
+statement ok
+alter session unset timezone
+
+query
+select hour('2024-07-01 12:00:00 +00:00'::timestamp_ltz)
+----
+5
+
+error 002043
+alter session set timezone = 'Not/AZone'
