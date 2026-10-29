@@ -454,7 +454,9 @@ fn translate_parsed(statement: Statement, ctx: &Context) -> Result<Command, SqlE
 /// - `NTH_VALUE(x, n) FROM LAST|FIRST OVER (...)` → `NTH_VALUE_FROM_LAST(x, n) OVER (...)`;
 /// - the `COLLATE(s, spec)` function → `SF_COLLATE(s, spec)` (COLLATE is a keyword).
 fn preprocess_tokens(sql: &str) -> Result<String, SqlError> {
-    let mut tokens = Tokenizer::new(&SnowflakeDialect, sql).tokenize()?;
+    // Keep string literals as written (`'\\'` stays two backslashes), since
+    // the tokens are joined back into SQL.
+    let mut tokens = Tokenizer::new(&SnowflakeDialect, sql).with_unescape(false).tokenize()?;
     let is_word = |t: &Token, w: &str| matches!(t, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(w));
     let next_significant =
         |tokens: &[Token], from: usize| (from..tokens.len()).find(|&j| !matches!(tokens[j], Token::Whitespace(_)));
@@ -549,7 +551,7 @@ fn drop_function(sql: &str) -> Result<Option<Command>, SqlError> {
 /// `CREATE SEQUENCE s START = 10 INCREMENT = 5`: Snowflake allows `=` in
 /// sequence options, sqlparser doesn't.
 fn strip_sequence_equals(sql: &str) -> Result<String, SqlError> {
-    let tokens = Tokenizer::new(&SnowflakeDialect, sql).tokenize()?;
+    let tokens = Tokenizer::new(&SnowflakeDialect, sql).with_unescape(false).tokenize()?;
     let words: Vec<String> = tokens
         .iter()
         .filter_map(|t| match t {
