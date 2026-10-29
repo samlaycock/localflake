@@ -11,6 +11,7 @@ mod files;
 mod functions;
 mod match_recognize;
 mod probe;
+mod search;
 mod sketch;
 mod stage;
 mod tz;

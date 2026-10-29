@@ -328,3 +328,64 @@ query
 select to_xml(parse_xml('<note> <body>Sample XML</body> </note>')), to_xml(object_construct('key1', 'value1', 'key2', 'value2')), to_xml(array_construct('v1', 'v2')), to_xml(parse_json(' { "key1": ["a1", "a2"] } '))
 ----
 <note><body>Sample XML</body></note>|<SnowflakeData type="OBJECT"><key1 type="VARCHAR">value1</key1><key2 type="VARCHAR">value2</key2></SnowflakeData>|<SnowflakeData type="ARRAY"><e type="VARCHAR">v1</e><e type="VARCHAR">v2</e></SnowflakeData>|<SnowflakeData type="OBJECT"><key1 type="ARRAY"><e type="VARCHAR">a1</e><e type="VARCHAR">a2</e></key1></SnowflakeData>
+
+query
+select parse_ip('192.168.242.188/24', 'INET')
+----
+{"family":4,"host":"192.168.242.188","ip_fields":[3232297660,0,0,0],"ip_type":"inet","ipv4":3232297660,"ipv4_range_end":3232297727,"ipv4_range_start":3232297472,"netmask_prefix_length":24,"snowflake$type":"ip_address"}
+
+query
+select parse_ip('fe80::20c:29ff:fe2c:429/64', 'INET')
+----
+{"family":6,"hex_ipv6":"FE80000000000000020C29FFFE2C0429","hex_ipv6_range_end":"FE80000000000000FFFFFFFFFFFFFFFF","hex_ipv6_range_start":"FE800000000000000000000000000000","host":"fe80::20c:29ff:fe2c:429","ip_fields":[4269801472,0,34351615,4264297513],"ip_type":"inet","netmask_prefix_length":64,"snowflake$type":"ip_address"}
+
+query
+select parse_ip('not an ip', 'INET', 1):error is not null
+----
+true
+
+statement ok
+create table ipt (id int, ipv4_source varchar(20), ipv4_target varchar(20), ipv6_target varchar(40))
+
+statement ok
+insert into ipt values (1, '192.0.2.146', '203.0.113.5', '2001:0db8:85a3:0000:0000:8a2e:0370:7334'), (2, '192.0.2.111', '192.000.002.146', '2001:db8:1234::5678')
+
+query
+select ipv4_source, search_ip((ipv4_source, ipv4_target, ipv6_target), '192.0.2.146'), search_ip((ipv6_target), '2001:db8:85a3::8a2e:370:7334'), search_ip((ipv4_source, ipv4_target), '192.0.2.1/20'), search_ip((ipv4_source, ipv4_target), '203.000.113.005') from ipt order by ipv4_source
+----
+192.0.2.111|true|false|true|false
+192.0.2.146|true|true|true|true
+
+query
+select search_ip('Connection from IP address 192.0.2.146 succeeded.', '192.0.2.146'), search_ip((id, ipv4_source), '192.0.2.146') from ipt order by id
+----
+true|true
+true|false
+
+error
+select search_ip(ipv4_source, '1925.0.2.146') from ipt
+
+statement ok
+create table lines (line_id int, play varchar(50), character varchar(30), line varchar(2000))
+
+statement ok
+insert into lines values (1, 'Henry IV Part 1', 'KING HENRY IV', 'So shaken as we are, so wan with care,'), (2, 'Henry V', 'FALSTAFF', 'Blue,red,green'), (3, 'Twelfth Night', 'MALVOLIO', 'docs@snowflake.com and bob''s burgers')
+
+query
+select line_id, search(line, 'shaken'), search((play, character), 'henry'), search(line, 'care wan', search_mode => 'AND'), search(line, 'wan care', search_mode => 'PHRASE'), search(line, 'blue,red,green', search_mode => 'EXACT') from lines order by line_id
+----
+1|true|true|true|false|false
+2|false|true|false|false|true
+3|false|false|false|false|false
+
+query
+select search(line, 'snowflake.com', analyzer => 'UNICODE_ANALYZER'), search(line, 'snowflake.com'), search(line, 'Blue,red,green', analyzer => 'NO_OP_ANALYZER'), search(line, 'blue,red,green', analyzer => 'NO_OP_ANALYZER') from lines order by line_id
+----
+false|false|false|false
+false|false|true|false
+true|true|false|false
+
+query
+select search(parse_json('{"a": "hello world", "b": 1}'), 'world'), search(null::varchar, 'x'), search(1, 'x')
+----
+true|NULL|false

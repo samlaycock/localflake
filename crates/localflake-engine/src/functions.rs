@@ -43,6 +43,9 @@ pub fn register(conn: &Connection) -> duckdb::Result<()> {
     conn.register_scalar_function::<crate::xml::XmlGet>("sf_xmlget")?;
     conn.register_scalar_function::<crate::xml::ToXml>("sf_to_xml")?;
     conn.register_scalar_function::<crate::xml::XmlText>("sf_xml_text")?;
+    conn.register_scalar_function::<crate::search::ParseIp>("sf_parse_ip")?;
+    conn.register_scalar_function::<crate::search::SearchIp>("sf_search_ip")?;
+    conn.register_scalar_function::<crate::search::Search>("sf_search")?;
     conn.register_scalar_function::<Sha2>("sf_sha2")?;
     conn.register_scalar_function::<InitCap>("sf_initcap")?;
     conn.register_scalar_function::<ParseUrl>("sf_parse_url")?;
