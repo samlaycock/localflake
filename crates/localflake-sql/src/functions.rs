@@ -1092,6 +1092,7 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             total.name = object_name(&["sum"]);
             crate::typing::divide(&ctx.types, arg(0)?, Expr::Function(total))
         }
+        "INTERPOLATE_FFILL" | "INTERPOLATE_BFILL" | "INTERPOLATE_LINEAR" => interpolate(f, &name, arg(0)?, ctx)?,
         "CONDITIONAL_TRUE_EVENT" => {
             let mut running = f.clone();
             running.name = object_name(&["sum"]);
@@ -1521,6 +1522,77 @@ fn distinct_of(f: &Function) -> Option<DuplicateTreatment> {
 }
 
 /// `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` on a window function.
+/// `INTERPOLATE_FFILL | BFILL | LINEAR(x) OVER (...)`: gap-fills NULLs from
+/// the previous and/or next non-NULL value in the window's order.
+fn interpolate(f: &Function, name: &str, value: Expr, ctx: &Context) -> Result<Expr, SqlError> {
+    use sqlparser::ast::{NullTreatment, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowType};
+    let Some(WindowType::WindowSpec(spec)) = &f.over else {
+        return Err(SqlError::Unsupported(format!("{name} without an OVER clause")));
+    };
+    if spec.window_frame.is_some() {
+        return Err(SqlError::Unsupported(format!("sliding window frame for function {name}")));
+    }
+    // last_value / first_value of `x` over the rows up to / from this one, skipping NULLs.
+    let fill = |x: Expr, previous: bool| {
+        let mut window = f.clone();
+        window.name = object_name(&[if previous { "last_value" } else { "first_value" }]);
+        window.args = function_args(vec![x], None);
+        if let FunctionArguments::List(list) = &mut window.args {
+            list.clauses.push(FunctionArgumentClause::IgnoreOrRespectNulls(NullTreatment::IgnoreNulls));
+        }
+        if let Some(WindowType::WindowSpec(spec)) = &mut window.over {
+            spec.window_frame = Some(WindowFrame {
+                units: WindowFrameUnits::Rows,
+                start_bound: if previous { WindowFrameBound::Preceding(None) } else { WindowFrameBound::CurrentRow },
+                end_bound: Some(if previous {
+                    WindowFrameBound::CurrentRow
+                } else {
+                    WindowFrameBound::Following(None)
+                }),
+            });
+        }
+        Expr::Function(window)
+    };
+    match name {
+        "INTERPOLATE_FFILL" => return Ok(fill(value, true)),
+        "INTERPOLATE_BFILL" => return Ok(fill(value, false)),
+        _ => {}
+    }
+    let [order] = spec.order_by.as_slice() else {
+        return Err(SqlError::Unsupported("INTERPOLATE_LINEAR needs exactly one ORDER BY expression".into()));
+    };
+    let (operand, value_type) = crate::typing::probed_operand(&ctx.types, value.clone());
+    let (key, key_type) = crate::typing::probed_operand(&ctx.types, order.expr.clone());
+    // Dates and timestamps interpolate by their position in time.
+    let temporal = key_type.as_deref().is_some_and(|t| t.starts_with("DATE") || t.starts_with("TIMESTAMP"));
+    let position =
+        |k: Expr| if temporal { func("epoch", vec![k]) } else { cast(k, DataType::Double(ExactNumberInfo::None)) };
+    let when_present = |x: Expr| case(vec![(is_not_null(value.clone()), x)], None);
+    let (prev_value, next_value) = (fill(operand.clone(), true), fill(operand.clone(), false));
+    let (prev_key, next_key) =
+        (fill(when_present(position(key.clone())), true), fill(when_present(position(key.clone())), false));
+    let step = binop(
+        nested(binop(position(key), BinaryOperator::Minus, prev_key.clone())),
+        BinaryOperator::Divide,
+        nested(binop(next_key.clone(), BinaryOperator::Minus, prev_key.clone())),
+    );
+    let gap = binop(
+        nested(binop(next_value.clone(), BinaryOperator::Minus, prev_value.clone())),
+        BinaryOperator::Multiply,
+        step,
+    );
+    let interpolated = binop(prev_value.clone(), BinaryOperator::Plus, gap);
+    // The result has the input's type.
+    let interpolated = match value_type {
+        Some(t) => cast(interpolated, custom_type(&t)),
+        None => interpolated,
+    };
+    Ok(case(
+        vec![(is_not_null(value), operand), (binop(next_key, BinaryOperator::Eq, prev_key), prev_value)],
+        Some(interpolated),
+    ))
+}
+
 fn running_frame(f: &mut Function) {
     use sqlparser::ast::{WindowFrame, WindowFrameBound, WindowFrameUnits, WindowType};
     if let Some(WindowType::WindowSpec(spec)) = &mut f.over {

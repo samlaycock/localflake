@@ -141,3 +141,36 @@ query
 select system$wait(10, 'MILLISECONDS'), system$wait(0), system$get_tag('cost_center', 'my_table', 'table'), length(system$get_tzdb_version())
 ----
 waited 10 milliseconds|waited 0 seconds|NULL|5
+
+statement ok
+create table temps (observed timestamp_ntz, temperature int, city varchar)
+
+statement ok
+insert into temps values ('2025-03-15 09:45:00', null, 'Big Bear City'), ('2025-03-15 09:49:00', 48, 'Big Bear City'), ('2025-03-15 09:50:00', null, 'Big Bear City'), ('2025-03-15 09:50:00', 44, 'South Lake Tahoe'), ('2025-03-15 09:55:00', 49, 'Big Bear City'), ('2025-03-15 09:55:00', 46, 'South Lake Tahoe'), ('2025-03-15 10:00:00', null, 'Big Bear City'), ('2025-03-15 10:00:00', null, 'South Lake Tahoe'), ('2025-03-15 10:05:00', null, 'Big Bear City'), ('2025-03-15 10:05:00', null, 'South Lake Tahoe'), ('2025-03-15 10:10:00', 51, 'Big Bear City'), ('2025-03-15 10:10:00', 52, 'South Lake Tahoe')
+
+query
+select observed, temperature, interpolate_bfill(temperature) over (partition by city order by observed) bfill, interpolate_ffill(temperature) over (partition by city order by observed) ffill, interpolate_linear(temperature) over (partition by city order by observed) linear, city from temps order by city, observed
+----
+2025-03-15 09:45:00|NULL|48|NULL|NULL|Big Bear City
+2025-03-15 09:49:00|48|48|48|48|Big Bear City
+2025-03-15 09:50:00|NULL|49|48|48|Big Bear City
+2025-03-15 09:55:00|49|49|49|49|Big Bear City
+2025-03-15 10:00:00|NULL|51|49|50|Big Bear City
+2025-03-15 10:05:00|NULL|51|49|50|Big Bear City
+2025-03-15 10:10:00|51|51|51|51|Big Bear City
+2025-03-15 09:50:00|44|44|44|44|South Lake Tahoe
+2025-03-15 09:55:00|46|46|46|46|South Lake Tahoe
+2025-03-15 10:00:00|NULL|52|46|48|South Lake Tahoe
+2025-03-15 10:05:00|NULL|52|46|50|South Lake Tahoe
+2025-03-15 10:10:00|52|52|52|52|South Lake Tahoe
+
+query
+select x, interpolate_linear(y) over (order by x) from (select column1 x, column2 y from values (1, 1.0::float), (2, null), (4, 4.0::float), (5, null)) order by x
+----
+1|1
+2|2
+4|4
+5|NULL
+
+error
+select interpolate_bfill(temperature) over (partition by city order by observed rows between 1 preceding and 1 following) from temps
