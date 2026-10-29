@@ -125,6 +125,10 @@ impl From<duckdb::Error> for EngineError {
             ("Catalog Error", Some(("Type", name))) => {
                 Self::compilation("002040", "0A000", format!("Unsupported data type '{}'.", name.to_uppercase()))
             }
+            ("Catalog Error", _) if detail.contains(" already exists") => match quoted_name(detail) {
+                Some(name) => Self::already_exists("Object", name),
+                None => Self::compilation("002002", "42710", detail),
+            },
             ("Catalog Error", Some((_, name))) => {
                 Self::compilation("002003", "42S02", format!("Object '{name}' does not exist or not authorized."))
             }
