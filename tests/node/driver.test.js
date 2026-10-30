@@ -190,3 +190,23 @@ test("statement timeout", async () => {
     return true;
   });
 });
+
+test("cancel a running block", async () => {
+  const conn = await connect();
+  let statement;
+  const finished = new Promise((resolve) => {
+    statement = conn.execute({
+      // The handler can't catch the cancellation.
+      sqlText: "BEGIN LOOP SELECT 1; END LOOP; EXCEPTION WHEN OTHER THEN RETURN 'caught'; END",
+      complete: (err, stmt, rows) => resolve(err ?? rows),
+    });
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  await new Promise((resolve, reject) => statement.cancel((err) => (err ? reject(err) : resolve())));
+  const outcome = await finished;
+  assert.ok(outcome instanceof Error, `the block should be cancelled, got ${JSON.stringify(outcome)}`);
+  const started = Date.now();
+  const { rows } = await exec(conn, "select 1 as one");
+  assert.equal(rows[0].ONE, 1);
+  assert.ok(Date.now() - started < 5_000);
+});
