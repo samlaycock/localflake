@@ -97,6 +97,18 @@ impl EngineError {
         Self::new("100167", "21000", "SELECT INTO returned more than one row")
     }
 
+    pub(crate) fn cursor_not_open(name: &str) -> Self {
+        Self::new("100147", "24000", format!("Cursor '{name}' is not open"))
+    }
+
+    pub(crate) fn resultset_not_assigned(name: &str) -> Self {
+        Self::new("100148", "24000", format!("RESULTSET '{name}' has not been assigned a query"))
+    }
+
+    pub(crate) fn resultset_query(text: &str) -> Self {
+        Self::compilation("001003", "42000", format!("a RESULTSET needs a query, not '{text}'"))
+    }
+
     pub(crate) fn execute_immediate_null() -> Self {
         Self::new("100039", "22004", "EXECUTE IMMEDIATE statement is NULL")
     }

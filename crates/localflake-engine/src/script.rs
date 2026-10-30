@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta};
 use localflake_sql::StatementKind;
-use localflake_sql::scripting::{Block, Declaration, Handler, Statement, Stmt};
+use localflake_sql::scripting::{Block, CursorSource, Declaration, Handler, Statement, Stmt};
 
 use crate::{Column, EngineError, QueryResult, Session, SfType, new_query_id};
 
@@ -51,6 +51,15 @@ struct Variable {
 struct Scope {
     variables: HashMap<String, Variable>,
     exceptions: HashMap<String, (i64, String)>,
+    /// RESULTSETs, with their result once a query is assigned.
+    resultsets: HashMap<String, Option<Arc<QueryResult>>>,
+    cursors: HashMap<String, Cursor>,
+}
+
+struct Cursor {
+    source: CursorSource,
+    /// The rows, once opened, and the next one FETCH reads.
+    open: Option<(Arc<QueryResult>, usize)>,
 }
 
 /// An exception in flight: its type name (`STATEMENT_ERROR`, `EXPRESSION_ERROR`
@@ -84,6 +93,8 @@ enum Flow {
     Break(Option<String>),
     Continue(Option<String>),
     Return(Value),
+    /// `RETURN TABLE(...)`.
+    ReturnTable(Arc<QueryResult>),
 }
 
 type Run<T> = Result<T, Failure>;
@@ -153,6 +164,7 @@ impl<'s> Interpreter<'s> {
         match stmt {
             Stmt::Block(block) => match self.block(block)? {
                 Flow::Return(value) => Ok(Outcome::Value(Some(value))),
+                Flow::ReturnTable(result) => Ok(Outcome::Result(Arc::unwrap_or_clone(result))),
                 _ => Ok(Outcome::Value(None)),
             },
             Stmt::ExecuteImmediate { sql, using } => self.execute_immediate(sql, using),
@@ -160,6 +172,7 @@ impl<'s> Interpreter<'s> {
                 let statement = Statement { stmt: other.clone(), line: 1, position: 0 };
                 match self.statement(&statement)? {
                     Flow::Return(value) => Ok(Outcome::Value(Some(value))),
+                    Flow::ReturnTable(result) => Ok(Outcome::Result(Arc::unwrap_or_clone(result))),
                     _ => Ok(Outcome::Value(None)),
                 }
             }
@@ -338,19 +351,7 @@ impl<'s> Interpreter<'s> {
 
     fn block_body(&mut self, block: &Block) -> Run<Flow> {
         for declaration in &block.declarations {
-            match declaration {
-                Declaration::Variable { name, data_type, default } => {
-                    let value = match default {
-                        Some(expr) => self.evaluate(expr, data_type.as_deref())?,
-                        None => Value::null(data_type.as_deref().unwrap_or("VARCHAR")),
-                    };
-                    let data_type = data_type.clone().or_else(|| Some(inferred_type(&value)));
-                    self.declare(name, data_type, value);
-                }
-                Declaration::Exception { name, code, message } => {
-                    self.scopes.last_mut().unwrap().exceptions.insert(name.clone(), (*code, message.clone()));
-                }
-            }
+            self.declare_other(declaration)?;
         }
         self.handlers.push(block.handlers.clone());
         let result = self.statements(&block.body);
@@ -362,6 +363,7 @@ impl<'s> Interpreter<'s> {
                     let flow = self.handle(&handler, &raised)?;
                     Ok(match flow {
                         Flow::Return(value) => Flow::Return(value),
+                        Flow::ReturnTable(result) => Flow::ReturnTable(result),
                         _ => Flow::Next,
                     })
                 }
@@ -423,6 +425,10 @@ impl<'s> Interpreter<'s> {
                 self.sql_statement(sql)?;
             }
             Stmt::Block(block) => return self.block(block),
+            Stmt::Assign { name, value, .. } if self.find_resultset(name).is_some() => {
+                let result = self.run_query_expression(value)?;
+                *self.find_resultset(name).unwrap() = Some(result);
+            }
             Stmt::Assign { name, data_type, value, declare } => {
                 if *declare {
                     let value = self.evaluate(value, data_type.as_deref())?;
@@ -535,8 +541,160 @@ impl<'s> Interpreter<'s> {
                 }
             }
             Stmt::Null => {}
+            Stmt::Declare(declaration) => self.declare_other(declaration)?,
+            Stmt::Open { cursor, using } => {
+                let values: Vec<String> = using
+                    .iter()
+                    .map(|n| {
+                        self.literal_of(n).ok_or_else(|| self.expression_error(EngineError::undeclared_variable(n)))
+                    })
+                    .collect::<Run<_>>()?;
+                let rows = self.cursor_rows(cursor, &values)?;
+                self.cursor_mut(cursor)?.open = Some((rows, 0));
+            }
+            Stmt::Fetch { cursor, into } => {
+                let (result, position) = match &self.cursor_mut(cursor)?.open {
+                    Some((result, position)) => (result.clone(), *position),
+                    None => return Err(self.statement_error(EngineError::cursor_not_open(cursor))),
+                };
+                self.cursor_mut(cursor)?.open = Some((result.clone(), position + 1));
+                let rows = result.json_rows().map_err(|e| self.statement_error(e))?;
+                // Past the last row, the variables become NULL.
+                for (i, name) in into.iter().enumerate() {
+                    let Some(column) = result.columns.get(i) else { break };
+                    let cell = rows.get(position).and_then(|r| r[i].as_deref());
+                    self.assign_converted(name, to_value(column, cell))?;
+                }
+            }
+            Stmt::Close(cursor) => self.cursor_mut(cursor)?.open = None,
+            Stmt::ForCursor { label, record, cursor, body } => {
+                let result = self.cursor_rows(cursor, &[])?;
+                let rows = result.json_rows().map_err(|e| self.statement_error(e))?;
+                for row in rows {
+                    self.scopes.push(Scope::default());
+                    for (column, cell) in result.columns.iter().zip(&row) {
+                        let field = format!("{record}.{}", column.name.to_uppercase());
+                        let value = to_value(column, cell.as_deref());
+                        self.declare(&field, Some(value.data_type.clone()), value);
+                    }
+                    let flow = self.statements(body);
+                    self.scopes.pop();
+                    match loop_flow(flow?, label) {
+                        LoopFlow::Next => {}
+                        LoopFlow::Stop => break,
+                        LoopFlow::Exit(flow) => return Ok(flow),
+                    }
+                }
+            }
+            Stmt::ReturnTable(source) => {
+                let source = source.trim();
+                let upper = source.to_uppercase();
+                let result = match upper.strip_prefix("RESULTSET_FROM_CURSOR") {
+                    Some(rest) => {
+                        let cursor = rest.trim().trim_start_matches('(').trim_end_matches(')').trim().to_uppercase();
+                        self.cursor_rows(&cursor, &[])?
+                    }
+                    None => self.resultset(&upper)?,
+                };
+                return Ok(Flow::ReturnTable(result));
+            }
         }
         Ok(Flow::Next)
+    }
+
+    /// Declares a cursor, RESULTSET or exception in the current scope.
+    fn declare_other(&mut self, declaration: &Declaration) -> Run<()> {
+        match declaration {
+            Declaration::Variable { name, data_type, default } => {
+                let value = match default {
+                    Some(expr) => self.evaluate(expr, data_type.as_deref())?,
+                    None => Value::null(data_type.as_deref().unwrap_or("VARCHAR")),
+                };
+                let data_type = data_type.clone().or_else(|| Some(inferred_type(&value)));
+                self.declare(name, data_type, value);
+            }
+            Declaration::Exception { name, code, message } => {
+                self.scopes.last_mut().unwrap().exceptions.insert(name.clone(), (*code, message.clone()));
+            }
+            Declaration::Cursor { name, source } => {
+                let cursor = Cursor { source: source.clone(), open: None };
+                self.scopes.last_mut().unwrap().cursors.insert(name.clone(), cursor);
+            }
+            Declaration::ResultSet { name, query } => {
+                let result = match query {
+                    Some(query) => Some(self.run_query_expression(query)?),
+                    None => None,
+                };
+                self.scopes.last_mut().unwrap().resultsets.insert(name.clone(), result);
+            }
+        }
+        Ok(())
+    }
+
+    fn find_resultset(&mut self, name: &str) -> Option<&mut Option<Arc<QueryResult>>> {
+        self.scopes.iter_mut().rev().find_map(|s| s.resultsets.get_mut(name))
+    }
+
+    fn resultset(&mut self, name: &str) -> Run<Arc<QueryResult>> {
+        match self.find_resultset(name) {
+            Some(Some(result)) => Ok(result.clone()),
+            Some(None) => Err(self.statement_error(EngineError::resultset_not_assigned(name))),
+            None => Err(self.expression_error(EngineError::undeclared_variable(name))),
+        }
+    }
+
+    fn cursor_mut(&mut self, name: &str) -> Run<&mut Cursor> {
+        let error = self.expression_error(EngineError::undeclared_variable(name));
+        self.scopes.iter_mut().rev().find_map(|s| s.cursors.get_mut(name)).ok_or(error)
+    }
+
+    /// A cursor's rows: those it was opened with, or its query (with `?` bound
+    /// to `values`) or RESULTSET's.
+    fn cursor_rows(&mut self, name: &str, values: &[String]) -> Run<Arc<QueryResult>> {
+        if values.is_empty()
+            && let Some((result, _)) = &self.cursor_mut(name)?.open
+        {
+            return Ok(result.clone());
+        }
+        match self.cursor_mut(name)?.source.clone() {
+            CursorSource::ResultSet(resultset) => self.resultset(&resultset),
+            CursorSource::Query(query) => {
+                let sql = localflake_sql::scripting::bind_placeholders(&query, values)
+                    .map_err(|e| self.statement_error(e.into()))?;
+                Ok(Arc::new(self.sql_statement(&sql)?))
+            }
+        }
+    }
+
+    /// `(SELECT ...)` or `(EXECUTE IMMEDIATE ...)` assigned to a RESULTSET.
+    fn run_query_expression(&mut self, expr: &str) -> Run<Arc<QueryResult>> {
+        let mut text = expr.trim();
+        // ASYNC queries run straight away.
+        if text.to_uppercase().starts_with("ASYNC") {
+            text = text[5..].trim();
+        }
+        let inner = text.strip_prefix('(').and_then(|t| t.strip_suffix(')')).unwrap_or(text).trim();
+        if inner.to_uppercase().starts_with("EXECUTE") {
+            let parsed = localflake_sql::scripting::parse(inner).map_err(|e| self.statement_error(e.into()))?;
+            let Stmt::ExecuteImmediate { sql, using } = parsed else {
+                return Err(self.statement_error(EngineError::resultset_query(inner)));
+            };
+            return match self.execute_immediate(&sql, &using)? {
+                Outcome::Result(result) => Ok(Arc::new(result)),
+                Outcome::Value(_) => Err(self.statement_error(EngineError::resultset_query(inner))),
+            };
+        }
+        Ok(Arc::new(self.sql_statement(inner)?))
+    }
+
+    /// Assigns a value, converting it to the variable's declared type.
+    fn assign_converted(&mut self, name: &str, value: Value) -> Run<()> {
+        let declared = self.lookup(name).and_then(|v| v.data_type.clone());
+        let value = match declared {
+            Some(t) if t != value.data_type => self.evaluate(&value.literal, Some(&t))?,
+            _ => value,
+        };
+        self.assign(name, value)
     }
 
     /// A SQL statement with `:variable` references, and `SELECT ... INTO :a, :b`.
@@ -562,13 +720,7 @@ impl<'s> Interpreter<'s> {
             for (i, name) in targets.iter().enumerate() {
                 let Some(column) = result.columns.get(i) else { break };
                 let cell = rows.first().and_then(|r| r[i].as_deref());
-                let declared = self.lookup(name).and_then(|v| v.data_type.clone());
-                let value = to_value(column, cell);
-                let value = match declared {
-                    Some(t) if t != value.data_type => self.evaluate(&value.literal, Some(&t))?,
-                    _ => value,
-                };
-                self.assign(name, value)?;
+                self.assign_converted(name, to_value(column, cell))?;
             }
         }
         Ok(result)
