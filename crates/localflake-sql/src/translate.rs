@@ -63,6 +63,8 @@ pub enum Command {
         name: String,
         if_exists: bool,
     },
+    /// A Snowflake Scripting block or `EXECUTE IMMEDIATE`, run by the engine's interpreter.
+    Script(crate::scripting::Stmt),
     /// `ALTER VIEW ... SET | UNSET COMMENT`: the engine replaces the view's
     /// comment, keeping its kind marker (see `views`).
     CommentOnView {
@@ -200,7 +202,20 @@ fn split_text(normalized: &str) -> Result<Vec<String>, SqlError> {
     let mut statements = Vec::new();
     let mut start = 0;
     let mut has_content = false;
+    // A Snowflake Scripting block is one statement, semicolons and all.
+    let mut blocks = crate::scripting::BlockTracker::new();
+    let significant: Vec<&Token> =
+        tokens.iter().map(|t| &t.token).filter(|t| !matches!(t, Token::Whitespace(_))).collect();
+    let mut index = 0;
     for twl in &tokens {
+        if !matches!(twl.token, Token::Whitespace(_)) {
+            let ends = blocks.feed(&twl.token, significant.get(index + 1).copied());
+            index += 1;
+            if matches!(twl.token, Token::SemiColon) && !ends {
+                has_content = true;
+                continue;
+            }
+        }
         match &twl.token {
             Token::SemiColon => {
                 let end = offsets.byte_offset(normalized, twl.span.start.line, twl.span.start.column);
@@ -225,6 +240,9 @@ fn split_text(normalized: &str) -> Result<Vec<String>, SqlError> {
 
 /// Translates one (already split and normalized) statement.
 pub fn translate_statement(sql: &str, ctx: &Context) -> Result<Command, SqlError> {
+    if crate::scripting::is_script(sql) {
+        return Ok(Command::Script(crate::scripting::parse(sql)?));
+    }
     if let Some(command) = crate::stage::parse(sql)? {
         return Ok(Command::Stage(command));
     }

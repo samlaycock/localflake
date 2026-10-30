@@ -675,3 +675,16 @@ fn cancelled_statement_keeps_the_transaction() {
     run(&mut s, "commit");
     assert_eq!(rows(&mut s, "select a from t order by a"), vec![vec![v("1")], vec![v("2")]]);
 }
+
+#[test]
+fn cancelling_a_block_isnt_caught_by_its_handlers() {
+    let mut s = session();
+    let cancel = CancelToken::default();
+    let token = cancel.clone();
+    let endless = "BEGIN LOOP SELECT 1; END LOOP; EXCEPTION WHEN OTHER THEN RETURN 'caught'; END";
+    let (error, seconds) = stopped(&mut s, endless, cancel, |_| token.cancel());
+    assert_eq!(error.code, "000604");
+    assert!(seconds < 10.0, "took {seconds}s");
+    run(&mut s, "alter session set statement_timeout_in_seconds = 1");
+    assert_eq!(fail(&mut s, "BEGIN LOOP NULL; END LOOP; END").code, "000630");
+}

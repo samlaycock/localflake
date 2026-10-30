@@ -12,6 +12,7 @@ mod files;
 mod functions;
 mod match_recognize;
 mod probe;
+mod script;
 mod search;
 mod sketch;
 mod stage;
@@ -369,6 +370,7 @@ impl Engine {
         let mut session = Session {
             engine: self.clone(),
             interrupt: conn.interrupt_handle(),
+            cancel: None,
             conn,
             ctx,
             in_transaction: false,
@@ -420,6 +422,8 @@ impl Engine {
 
 pub struct Session {
     conn: Connection,
+    /// The cancel token of the request being run (Snowflake Scripting checks it between statements).
+    cancel: Option<CancelToken>,
     /// Interrupts `conn`, for cancelling its statements (see `cancel`).
     interrupt: Arc<duckdb::InterruptHandle>,
     engine: Engine,
@@ -547,7 +551,9 @@ impl Session {
             self.interrupt.clone(),
             limit,
         );
+        self.cancel = Some(request.cancel.clone());
         let result = self.run_statement(statement, query_id, bindings, request.describe_only);
+        self.cancel = None;
         drop(running);
         let Some(error) = request.cancel.error(timeout) else { return result };
         // An interrupt that lands after the statement's last DuckDB query stays
@@ -687,6 +693,7 @@ impl Session {
         };
         match self.translate_bound(sql, bindings.first().map(Vec::as_slice).unwrap_or_default())? {
             Command::Stage(command) => self.run_stage_command(command, query_id),
+            Command::Script(stmt) => self.run_script(stmt, query_id),
             Command::Use(target) => {
                 self.apply_use(target)?;
                 ok()

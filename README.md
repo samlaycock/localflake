@@ -218,6 +218,14 @@ differences between drivers.
   USING`, `INSERT OVERWRITE`, multi-table `INSERT ALL|FIRST` with `WHEN`/`ELSE`
 - SQL user-defined functions, scalar and table (`RETURNS TABLE`), with default
   arguments, stored as DuckDB macros
+- Snowflake Scripting: anonymous blocks (`DECLARE ... BEGIN ... EXCEPTION ...
+  END`) and `EXECUTE IMMEDIATE` (strings, variables, `$session_variables`,
+  `USING`), with typed variables, `LET`, `IF`, `CASE`, `FOR`, `WHILE`,
+  `REPEAT`, `LOOP`, labelled `BREAK`/`CONTINUE`, `RETURN`, `SELECT ... INTO`,
+  `:variable` binds in SQL, `SQLROWCOUNT`/`SQLFOUND`/`SQLNOTFOUND`/
+  `ACTIVITY_COUNT`, declared exceptions, `RAISE`, `EXIT` and `CONTINUE`
+  handlers with `SQLCODE`/`SQLERRM`/`SQLSTATE`, and Snowflake's "Uncaught
+  exception ... on line N at position M" errors
 - DDL: `CREATE [OR REPLACE] [TRANSIENT] TABLE`, `CTAS`, `LIKE`, `CLONE`,
   `AUTOINCREMENT`/`IDENTITY`, comments, `ALTER TABLE ... ADD/DROP/RENAME
   COLUMN`, `SWAP WITH`, views, materialized views, dynamic tables, `ALTER
@@ -347,8 +355,12 @@ types known.
   (which reports `REFRESH_MODE = AUTO` as given, where Snowflake reports the
   mode it chose). `SHOW TABLES`, `SHOW OBJECTS` and `INFORMATION_SCHEMA.TABLES`
   list dynamic tables as tables.
-- Not implemented: JavaScript/Python/Java UDFs, stored procedures, Snowflake
-  Scripting, time travel, streams and tasks.
+- Snowflake Scripting doesn't support cursors, `RESULTSET`s or `RETURN
+  TABLE(...)` yet. Expressions are evaluated as queries, so a block's
+  variables round-trip through SQL literals; `SELECT ... INTO` with no rows
+  sets the variables to NULL.
+- Not implemented: JavaScript/Python/Java UDFs, stored procedures, time
+  travel, streams and tasks.
 - No authentication, roles or access control.
 
 ## Configuration

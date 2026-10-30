@@ -1806,6 +1806,54 @@
           ]
         }
       ]
+    },
+    {
+      "name": "scripting/blocks",
+      "steps": [
+        {
+          "sql": "DECLARE\n  total INTEGER DEFAULT 0;\nBEGIN\n  FOR i IN 1 TO 4 DO\n    total := total + i;\n  END FOR;\n  RETURN total;\nEND;",
+          "columns": [
+            [
+              "anonymous block",
+              "FIXED(*,0)"
+            ]
+          ],
+          "rows": [
+            [
+              "10"
+            ]
+          ]
+        },
+        {
+          "sql": "EXECUTE IMMEDIATE $$\nBEGIN\n  LET greeting := 'hello';\n  RETURN greeting || ' world';\nEND;\n$$",
+          "columns": [
+            [
+              "anonymous block",
+              "TEXT"
+            ]
+          ],
+          "rows": [
+            [
+              "hello world"
+            ]
+          ]
+        },
+        {
+          "sql": "DECLARE\n  e EXCEPTION (-20002, 'Raised E.');\nBEGIN\n  RAISE e;\nEND;",
+          "error": {
+            "code": "-20002",
+            "sqlstate": "P0001"
+          }
+        },
+        {
+          "sql": "select 1 as still_connected",
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        }
+      ]
     }
   ]
 }
