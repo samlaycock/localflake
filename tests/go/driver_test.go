@@ -323,3 +323,30 @@ func TestStatementTimeout(t *testing.T) {
 		t.Fatalf("got %d %s", sfErr.Number, sfErr.SQLState)
 	}
 }
+
+func TestCancelBlock(t *testing.T) {
+	db := open(t, "GO_CANCEL_BLOCK")
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// The handler can't catch the cancellation.
+	block := "BEGIN LOOP SELECT 1; END LOOP; EXCEPTION WHEN OTHER THEN RETURN 'caught'; END"
+	var result string
+	if err := conn.QueryRowContext(ctx, block).Scan(&result); err == nil {
+		t.Fatalf("the block should be cancelled, got %q", result)
+	}
+	// The session runs one statement at a time, so this only returns quickly
+	// if the abort request stopped the block on the server.
+	started := time.Now()
+	var n int
+	if err := conn.QueryRowContext(context.Background(), "select 1").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("got %d, %v", n, err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("the next query waited %v", elapsed)
+	}
+}

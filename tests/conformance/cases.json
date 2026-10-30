@@ -1854,6 +1854,78 @@
           ]
         }
       ]
+    },
+    {
+      "name": "scripting/multi-statement-and-async",
+      "steps": [
+        {
+          "sql": "select 1 as a;\ndeclare\n  x integer default 2;\nbegin\n  if (x > 1) then\n    x := x * 3;\n  end if;\n  return x;\nend;\nselect 3 as c",
+          "statements": 3,
+          "results": [
+            {
+              "columns": [
+                [
+                  "A",
+                  "FIXED(*,0)"
+                ]
+              ],
+              "rows": [
+                [
+                  "1"
+                ]
+              ]
+            },
+            {
+              "columns": [
+                [
+                  "anonymous block",
+                  "FIXED(*,0)"
+                ]
+              ],
+              "rows": [
+                [
+                  "6"
+                ]
+              ]
+            },
+            {
+              "columns": [
+                [
+                  "C",
+                  "FIXED(*,0)"
+                ]
+              ],
+              "rows": [
+                [
+                  "3"
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "sql": "begin\n  return 'async block';\nend;",
+          "async": true,
+          "columns": [
+            [
+              "anonymous block",
+              "TEXT"
+            ]
+          ],
+          "rows": [
+            [
+              "async block"
+            ]
+          ]
+        },
+        {
+          "sql": "declare\n  e exception (-20003, 'Async failure.');\nbegin\n  raise e;\nend;",
+          "async": true,
+          "error": {
+            "code": "-20003"
+          }
+        }
+      ]
     }
   ]
 }

@@ -37,6 +37,8 @@ The spec covers:
 - transactions (rollback, commit after a failed statement, `AUTOCOMMIT = FALSE`)
 - `ALTER SESSION` and session variables
 - stages: `PUT`, `LIST`, `COPY INTO`, unload, `GET`, and querying staged files
+- Snowflake Scripting: bare blocks and `EXECUTE IMMEDIATE $$...$$`, a block
+  inside a multi-statement request, async blocks, and uncaught exceptions
 
 ## Driver-specific tests
 
@@ -56,6 +58,8 @@ Driver APIs that SQL can't express are tested in each suite's own files
 | Multi-statement API | spec (`num_statements`, `nextset`) | spec (`MULTI_STATEMENT_COUNT`, `NextResult`) | spec (`WithMultiStatement`) |
 | Describe-only | spec (`describe`) | spec (`describeOnly`) | spec (`WithDescribeOnly`) |
 | `PUT`/`GET` | `test_put_copy_get_roundtrip` and spec | `put, copy and get through a stage` and spec | `TestStages` and spec |
+| Cancellation | none (no client-side cancel or timeout in the Rust-core connector) | `cancel a running statement`, `cancel a running block` (`statement.cancel()`) | `TestCancel`, `TestCancelBlock` (context cancellation) |
+| Statement timeouts | `test_statement_timeout` | `statement timeout` | `TestStatementTimeout` |
 
 A new driver API gets a test in every suite whose driver has it.
 
@@ -75,8 +79,8 @@ spec skips the affected cases, with the reason, for those drivers:
 
 ## Not yet covered
 
-- Query cancellation and statement timeouts: localflake runs queries
-  synchronously and ignores abort requests.
+- Cancelling an async query: localflake runs async queries to completion
+  before responding, so there's nothing left to abort.
 - Session keep-alive heartbeats and token renewal.
 - Stream-based `PUT`/`GET` (Python's `file_stream`, Go's `WithFilePutStream`).
 - Arrow batch and pandas APIs (`fetch_pandas_all`, Go's Arrow batches).
