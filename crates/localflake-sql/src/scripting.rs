@@ -44,6 +44,17 @@ pub enum Declaration {
     Variable { name: String, data_type: Option<String>, default: Option<String> },
     /// `name EXCEPTION (code, 'message')`.
     Exception { name: String, code: i64, message: String },
+    /// `name CURSOR FOR <query | resultset>`.
+    Cursor { name: String, source: CursorSource },
+    /// `name RESULTSET [{DEFAULT | :=} (<query>)]`.
+    ResultSet { name: String, query: Option<String> },
+}
+
+/// What a cursor reads: a query (run when the cursor opens), or a RESULTSET.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CursorSource {
+    Query(String),
+    ResultSet(String),
 }
 
 /// `WHEN name [OR name ...] [EXIT | CONTINUE] THEN ...`; `OTHER` matches
@@ -104,6 +115,29 @@ pub enum Stmt {
     Return(Option<String>),
     /// `RAISE [name]`; without a name, re-raises the exception being handled.
     Raise(Option<String>),
+    /// `LET name CURSOR FOR ...` / `LET name RESULTSET := (...)`.
+    Declare(Declaration),
+    /// `OPEN cursor [USING (var, ...)]`.
+    Open {
+        cursor: String,
+        using: Vec<String>,
+    },
+    /// `FETCH cursor INTO var, ...`.
+    Fetch {
+        cursor: String,
+        into: Vec<String>,
+    },
+    Close(String),
+    /// `FOR record IN cursor DO ... END FOR`.
+    ForCursor {
+        label: Option<String>,
+        record: String,
+        cursor: String,
+        body: Vec<Statement>,
+    },
+    /// `RETURN TABLE(resultset)`: the argument as written (a RESULTSET's name,
+    /// or `RESULTSET_FROM_CURSOR(cursor)`).
+    ReturnTable(String),
     /// `EXECUTE IMMEDIATE expr [USING (var, ...)]`.
     ExecuteImmediate {
         sql: String,
@@ -343,11 +377,35 @@ impl<'a> Parser<'a> {
             self.expect(&Token::RParen)?;
             return Ok(Declaration::Exception { name, code: if negative { -code } else { code }, message });
         }
-        if matches!(self.peek_word().as_deref(), Some("CURSOR" | "RESULTSET")) {
-            return Err(self.error("cursors and RESULTSETs aren't supported yet"));
+        if let Some(declaration) = self.cursor_or_resultset(&name, true)? {
+            return Ok(declaration);
         }
         let (data_type, default) = self.typed_value(true)?;
         Ok(Declaration::Variable { name, data_type, default })
+    }
+
+    /// `CURSOR FOR ...` or `RESULTSET [{DEFAULT | :=} (query)]` after a name.
+    fn cursor_or_resultset(&mut self, name: &str, optional_query: bool) -> Result<Option<Declaration>, SqlError> {
+        if self.eat_word("CURSOR") {
+            self.expect_word("FOR")?;
+            // A lone name is a RESULTSET; anything else is a query.
+            let single_name = matches!(self.peek(), Some(Token::Word(_)))
+                && matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::SemiColon) | None);
+            let source =
+                if single_name { CursorSource::ResultSet(self.name()?) } else { CursorSource::Query(self.until(&[])?) };
+            return Ok(Some(Declaration::Cursor { name: name.to_owned(), source }));
+        }
+        if self.eat_word("RESULTSET") {
+            let query = if self.eat_word("DEFAULT") || self.eat(&Token::Assignment) {
+                Some(self.until(&[])?)
+            } else if optional_query {
+                None
+            } else {
+                return Err(self.error("expected DEFAULT or :="));
+            };
+            return Ok(Some(Declaration::ResultSet { name: name.to_owned(), query }));
+        }
+        Ok(None)
     }
 
     /// `[type] [{DEFAULT | :=} expr]`.
@@ -418,8 +476,8 @@ impl<'a> Parser<'a> {
             Some("LET") => {
                 self.pos += 1;
                 let name = self.name()?;
-                if matches!(self.peek_word().as_deref(), Some("CURSOR" | "RESULTSET")) {
-                    return Err(self.error("cursors and RESULTSETs aren't supported yet"));
+                if let Some(declaration) = self.cursor_or_resultset(&name, false)? {
+                    return Ok(Stmt::Declare(declaration));
                 }
                 let (data_type, value) = self.typed_value(false)?;
                 Stmt::Assign { name, data_type, value: value.unwrap_or_default(), declare: true }
@@ -465,9 +523,21 @@ impl<'a> Parser<'a> {
                 let variable = self.name()?;
                 self.expect_word("IN")?;
                 let reverse = self.eat_word("REVERSE");
+                // `FOR record IN cursor DO`.
+                if !reverse
+                    && matches!(self.peek(), Some(Token::Word(_)))
+                    && self.word_at(self.pos + 1).as_deref() == Some("DO")
+                {
+                    let cursor = self.name()?;
+                    self.expect_word("DO")?;
+                    let body = self.statements()?;
+                    self.expect_word("END")?;
+                    self.expect_word("FOR")?;
+                    return Ok(Stmt::ForCursor { label: self.end_label(), record: variable, cursor, body });
+                }
                 let start = self.until(&["TO", "DO", "LOOP"])?;
                 if !self.eat_word("TO") {
-                    return Err(self.error("cursor FOR loops aren't supported yet"));
+                    return Err(self.error("expected TO"));
                 }
                 let end = self.until(&["DO", "LOOP"])?;
                 let keyword = self.peek_word().unwrap_or_default();
@@ -513,6 +583,60 @@ impl<'a> Parser<'a> {
             Some("CONTINUE" | "ITERATE") => {
                 self.pos += 1;
                 Stmt::Continue(self.end_label())
+            }
+            Some("RETURN")
+                if self.word_at(self.pos + 1).as_deref() == Some("TABLE")
+                    && matches!(self.tokens.get(self.pos + 2).map(|t| &t.token), Some(Token::LParen)) =>
+            {
+                self.pos += 3;
+                let start = self.pos;
+                let mut depth = 1;
+                while let Some(token) = self.peek() {
+                    match token {
+                        Token::LParen => depth += 1,
+                        Token::RParen if depth == 1 => break,
+                        Token::RParen => depth -= 1,
+                        _ => {}
+                    }
+                    self.pos += 1;
+                }
+                let inner = self.text(start, self.pos);
+                self.expect(&Token::RParen)?;
+                Stmt::ReturnTable(inner)
+            }
+            Some("OPEN") => {
+                self.pos += 1;
+                let cursor = self.name()?;
+                let mut using = vec![];
+                if self.eat_word("USING") {
+                    self.expect(&Token::LParen)?;
+                    loop {
+                        using.push(self.name()?);
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                }
+                Stmt::Open { cursor, using }
+            }
+            Some("FETCH") => {
+                self.pos += 1;
+                let cursor = self.name()?;
+                self.expect_word("INTO")?;
+                let mut into = vec![];
+                loop {
+                    self.eat(&Token::Colon);
+                    into.push(self.name()?);
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+                Stmt::Fetch { cursor, into }
+            }
+            Some("CLOSE") => {
+                self.pos += 1;
+                Stmt::Close(self.name()?)
             }
             Some("RETURN") => {
                 self.pos += 1;
@@ -654,6 +778,19 @@ pub fn substitute(sql: &str, lookup: &dyn Fn(&str) -> Option<String>, bare: bool
                     i += 2;
                     continue;
                 }
+            }
+            // `record.field` (a FOR loop's row variable).
+            Token::Word(w)
+                if matches!(next, Some(Token::Period))
+                    && !matches!(prev, Some(Token::Period))
+                    && let Some((Token::Word(field), _, field_end)) = tokens.get(i + 2)
+                    && let Some(value) = lookup(&format!("{}.{}", variable_name(w), variable_name(field))) =>
+            {
+                out.push_str(&sql[copied..*start]);
+                out.push_str(&wrap(&value));
+                copied = *field_end;
+                i += 3;
+                continue;
             }
             Token::Word(w) if bare && !parens.iter().any(|&q| q) => {
                 let qualified = matches!(prev, Some(Token::Period | Token::Colon | Token::DoubleColon));
@@ -885,6 +1022,8 @@ mod substitution_tests {
             "(SELECT X FROM T WHERE Y = (42)) + (42)"
         );
         assert_eq!(substitute("T.X + X(1) + Y", &lookup, true).unwrap(), "T.X + X(1) + Y");
+        let record = |name: &str| (name == "REC.PRICE").then(|| "1.5".to_owned());
+        assert_eq!(substitute("TOTAL + REC.PRICE + T.PRICE", &record, true).unwrap(), "TOTAL + (1.5) + T.PRICE");
     }
 
     #[test]

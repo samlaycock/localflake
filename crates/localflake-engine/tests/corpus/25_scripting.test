@@ -464,3 +464,127 @@ BEGIN
 END
 ----
 2
+
+statement ok
+CREATE OR REPLACE TABLE invoices (id INTEGER, price NUMBER(12, 2))
+
+statement ok
+INSERT INTO invoices (id, price) VALUES (1, 11.11), (2, 22.22)
+
+query
+DECLARE
+  id INTEGER DEFAULT 0;
+  minimum_price NUMBER(13,2) DEFAULT 22.00;
+  maximum_price NUMBER(13,2) DEFAULT 33.00;
+  c1 CURSOR FOR SELECT id FROM invoices WHERE price > ? AND price < ?;
+BEGIN
+  OPEN c1 USING (minimum_price, maximum_price);
+  FETCH c1 INTO id;
+  RETURN id;
+END
+----
+2
+
+query
+DECLARE
+  row_price FLOAT;
+  total_price FLOAT;
+  c1 CURSOR FOR SELECT price FROM invoices ORDER BY id;
+BEGIN
+  row_price := 0.0;
+  total_price := 0.0;
+  OPEN c1;
+  FETCH c1 INTO row_price;
+  total_price := total_price + row_price;
+  FETCH c1 INTO row_price;
+  total_price := total_price + row_price;
+  CLOSE c1;
+  RETURN total_price;
+END
+----
+33.33
+
+query
+DECLARE
+  total_price FLOAT;
+  c1 CURSOR FOR SELECT price FROM invoices;
+BEGIN
+  total_price := 0.0;
+  FOR record IN c1 DO
+    total_price := total_price + record.price;
+  END FOR;
+  RETURN total_price;
+END
+----
+33.33
+
+query rowsort
+DECLARE
+  c1 CURSOR FOR SELECT * FROM invoices;
+BEGIN
+  OPEN c1;
+  RETURN TABLE(RESULTSET_FROM_CURSOR(c1));
+END
+----
+1|11.11
+2|22.22
+
+query
+BEGIN
+  LET res RESULTSET := (SELECT price FROM invoices WHERE price > 20);
+  RETURN TABLE(res);
+END
+----
+22.22
+
+query
+DECLARE
+  res RESULTSET DEFAULT (SELECT price FROM invoices ORDER BY id);
+  c1 CURSOR FOR res;
+BEGIN
+  FOR record IN c1 DO
+    RETURN record.price;
+  END FOR;
+END
+----
+11.11
+
+query
+DECLARE
+  accumulator INTEGER DEFAULT 0;
+  res1 RESULTSET DEFAULT (SELECT id FROM invoices ORDER BY id);
+  cur1 CURSOR FOR res1;
+BEGIN
+  FOR row_variable IN cur1 DO
+    accumulator := accumulator + row_variable.id;
+  END FOR;
+  RETURN accumulator::VARCHAR;
+END
+----
+3
+
+query
+DECLARE
+  res RESULTSET;
+  query VARCHAR DEFAULT 'SELECT id FROM invoices WHERE price > ? ORDER BY id';
+  minimum NUMBER(12,2) DEFAULT 20;
+BEGIN
+  res := (EXECUTE IMMEDIATE :query USING (minimum));
+  RETURN TABLE(res);
+END
+----
+2
+
+query
+DECLARE
+  id INTEGER DEFAULT 5;
+  c1 CURSOR FOR SELECT id FROM invoices ORDER BY id;
+BEGIN
+  OPEN c1;
+  FETCH c1 INTO id;
+  FETCH c1 INTO id;
+  FETCH c1 INTO id;
+  RETURN id;
+END
+----
+NULL
