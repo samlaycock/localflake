@@ -1,0 +1,466 @@
+# Snowflake Scripting: anonymous blocks and EXECUTE IMMEDIATE. Expected results
+# are the examples in Snowflake's Snowflake Scripting documentation.
+
+query types
+DECLARE
+  radius_of_circle FLOAT;
+  area_of_circle FLOAT;
+BEGIN
+  radius_of_circle := 3;
+  area_of_circle := pi() * radius_of_circle * radius_of_circle;
+  RETURN area_of_circle;
+END
+----
+FLOAT
+28.274333882308138
+
+query
+EXECUTE IMMEDIATE $$
+DECLARE
+  radius_of_circle FLOAT;
+  area_of_circle FLOAT;
+BEGIN
+  radius_of_circle := 3;
+  area_of_circle := PI() * radius_of_circle * radius_of_circle;
+  RETURN area_of_circle;
+END;
+$$
+----
+28.274333882308138
+
+query
+BEGIN
+  CREATE TABLE parent (ID INTEGER);
+  CREATE TABLE child (ID INTEGER, parent_ID INTEGER);
+  RETURN 'Completed';
+END
+----
+Completed
+
+query
+DECLARE
+  profit number(38, 2) DEFAULT 0.0;
+BEGIN
+  LET cost number(38, 2) := 100.0;
+  LET revenue number(38, 2) DEFAULT 110.0;
+  profit := revenue - cost;
+  RETURN profit;
+END
+----
+10.00
+
+query
+DECLARE
+    profit DEFAULT 0.0;
+BEGIN
+    LET cost := 100.0;
+    LET revenue DEFAULT 110.0;
+    profit := revenue - cost;
+    RETURN profit;
+END
+----
+10
+
+statement ok
+CREATE OR REPLACE TABLE some_data (id INTEGER, name VARCHAR)
+
+statement ok
+INSERT INTO some_data (id, name) VALUES (1, 'a'), (2, 'b')
+
+query
+DECLARE
+  id INTEGER;
+  name VARCHAR;
+BEGIN
+  SELECT id, name INTO :id, :name FROM some_data WHERE id = 1;
+  RETURN id || ' ' || name;
+END
+----
+1 a
+
+query
+DECLARE
+  w INTEGER;
+  x INTEGER DEFAULT 0;
+  dt DATE;
+  result_string VARCHAR;
+BEGIN
+  w := 1;
+  w := 24 * 7;
+  dt := '2020-09-30'::DATE;
+  dt := '2020-09-30';
+  result_string := w::VARCHAR || ', ' || dt::VARCHAR;
+  RETURN result_string;
+END
+----
+168, 2020-09-30
+
+query
+BEGIN
+  LET mydate := '2024-05-08';
+  WHILE (mydate < '2024-05-20') DO
+    mydate := DATEADD(day, 1, mydate);
+  END WHILE;
+  RETURN mydate;
+END
+----
+2024-05-20 00:00:00.000
+
+query
+DECLARE
+  i INTEGER;
+  j INTEGER;
+BEGIN
+  i := 1;
+  j := 1;
+  WHILE (i <= 4) DO
+    WHILE (j <= 4) DO
+      IF (j = 3) THEN BREAK outer_loop; END IF;
+      j := j + 1;
+    END WHILE inner_loop;
+    i := i + 1;
+  END WHILE outer_loop;
+  RETURN i;
+END
+----
+1
+
+query
+DECLARE
+  counter1 NUMBER(8, 0);
+  counter2 NUMBER(8, 0);
+BEGIN
+  counter1 := 0;
+  counter2 := 0;
+  WHILE (counter1 < 3) DO
+    counter1 := counter1 + 1;
+    CONTINUE;
+    counter2 := counter2 + 1;
+  END WHILE;
+  RETURN counter2;
+END
+----
+0
+
+query
+DECLARE
+  counter NUMBER(8, 0);
+  power_of_2 NUMBER(8, 0);
+BEGIN
+  counter := 1;
+  power_of_2 := 1;
+  REPEAT
+    power_of_2 := power_of_2 * 2;
+    counter := counter + 1;
+  UNTIL (counter > 8)
+  END REPEAT;
+  RETURN power_of_2;
+END
+----
+256
+
+statement ok
+CREATE TABLE dummy_data (ID INTEGER)
+
+query
+DECLARE counter INTEGER;
+BEGIN
+  counter := 0;
+  LOOP
+    counter := counter + 1;
+    IF (counter > 5) THEN BREAK; END IF;
+    INSERT INTO dummy_data (ID) VALUES (:counter);
+  END LOOP;
+  RETURN counter;
+END
+----
+6
+
+query
+SELECT count(*), sum(id) FROM dummy_data
+----
+5|15
+
+query
+DECLARE values_of_i VARCHAR DEFAULT '';
+BEGIN
+  FOR i IN REVERSE 1 TO 3 DO
+    values_of_i := values_of_i || ' ' || i::varchar;
+  END FOR;
+  RETURN values_of_i;
+END
+----
+ 3 2 1
+
+query
+DECLARE
+  counter INTEGER DEFAULT 0;
+  i INTEGER DEFAULT -999;
+  return_value VARCHAR DEFAULT '';
+BEGIN
+  FOR i IN 1 TO 3 DO counter := counter + 1; END FOR;
+  return_value := 'counter: ' || counter::varchar || ', i: ' || i::VARCHAR;
+  RETURN return_value;
+END
+----
+counter: 3, i: -999
+
+query
+DECLARE v VARCHAR DEFAULT 'second choice';
+BEGIN
+  CASE (v)
+    WHEN 'first choice' THEN RETURN 'one';
+    WHEN 'second choice' THEN RETURN 'two';
+    ELSE RETURN 'unexpected choice';
+  END;
+END
+----
+two
+
+query
+DECLARE v VARCHAR DEFAULT 'none of the above';
+BEGIN
+  CASE
+    WHEN v = 'first choice' THEN RETURN 'one';
+    WHEN v = 'second choice' THEN RETURN 'two';
+    ELSE RETURN 'unexpected choice';
+  END CASE;
+END
+----
+unexpected choice
+
+query
+DECLARE
+  result VARCHAR;
+  exception_1 EXCEPTION (-20001, 'I caught the expected exception.');
+  exception_2 EXCEPTION (-20002, 'Not the expected exception!');
+BEGIN
+  result := 'If you see this, I did not catch any exception.';
+  IF (TRUE) THEN RAISE exception_1; END IF;
+  RETURN result;
+EXCEPTION
+  WHEN exception_2 THEN RETURN SQLERRM;
+  WHEN exception_1 THEN RETURN SQLERRM;
+END
+----
+I caught the expected exception.
+
+query
+DECLARE exception_1 EXCEPTION (-20001, 'Catch and continue');
+BEGIN
+  LET counter := 0;
+  IF (TRUE) THEN RAISE exception_1; END IF;
+  counter := counter + 10;
+  RETURN 'Counter value: ' || counter;
+EXCEPTION
+  WHEN exception_1 CONTINUE THEN counter := counter + 1;
+END
+----
+Counter value: 11
+
+query
+DECLARE x INT := 0;
+BEGIN
+  FOR i IN 0 TO 5 DO x := 10/i; END FOR;
+  RETURN x;
+EXCEPTION
+  WHEN EXPRESSION_ERROR CONTINUE THEN NULL;
+END
+----
+2
+
+query
+DECLARE e1 EXCEPTION (-20001, 'Exception e1');
+BEGIN
+  DECLARE
+    e2 EXCEPTION (-20002, 'Exception e2');
+    selector BOOLEAN DEFAULT TRUE;
+  BEGIN
+    IF (selector) THEN RAISE e1; ELSE RAISE e2; END IF;
+  END;
+EXCEPTION
+  WHEN e1 THEN RETURN SQLERRM || ' caught in outer block.';
+END
+----
+Exception e1 caught in outer block.
+
+query
+DECLARE
+  result VARCHAR;
+  e1 EXCEPTION (-20001, 'Outer exception e1');
+BEGIN
+  result := 'No error so far (but there will be).';
+  DECLARE e1 EXCEPTION (-20101, 'Inner exception e1');
+  BEGIN RAISE e1;
+  EXCEPTION WHEN e1 THEN result := 'Inner exception raised.'; RETURN result;
+  END;
+  RETURN result;
+EXCEPTION
+  WHEN e1 THEN result := 'Outer exception raised.'; RETURN result;
+END
+----
+Inner exception raised.
+
+query
+DECLARE MY_EXCEPTION EXCEPTION (-20001, 'Sample message');
+BEGIN RAISE MY_EXCEPTION;
+EXCEPTION
+  WHEN STATEMENT_ERROR THEN RETURN OBJECT_CONSTRUCT('Error type', 'STATEMENT_ERROR', 'SQLCODE', SQLCODE, 'SQLERRM', SQLERRM, 'SQLSTATE', SQLSTATE);
+  WHEN EXPRESSION_ERROR THEN RETURN OBJECT_CONSTRUCT('Error type', 'EXPRESSION_ERROR', 'SQLCODE', SQLCODE, 'SQLERRM', SQLERRM, 'SQLSTATE', SQLSTATE);
+  WHEN OTHER THEN RETURN OBJECT_CONSTRUCT('Error type', 'Other error', 'SQLCODE', SQLCODE, 'SQLERRM', SQLERRM, 'SQLSTATE', SQLSTATE);
+END
+----
+{"Error type":"Other error","SQLCODE":-20001,"SQLERRM":"Sample message","SQLSTATE":"P0001"}
+
+query
+DECLARE
+  counter_val INTEGER DEFAULT 0;
+  my_exception EXCEPTION (-20002, 'My exception text');
+BEGIN
+  WHILE (counter_val < 12) DO
+    counter_val := counter_val + 1;
+    IF (counter_val > 10) THEN
+      RAISE my_exception;
+    END IF;
+  END WHILE;
+  RETURN counter_val;
+EXCEPTION
+  WHEN my_exception THEN
+    RETURN 'Error ' || sqlcode || ': Counter value ' || counter_val || ' exceeds the limit of 10.';
+END
+----
+Error -20002: Counter value 11 exceeds the limit of 10.
+
+error -20002
+DECLARE
+  my_exception EXCEPTION (-20002, 'Raised MY_EXCEPTION.');
+BEGIN
+  LET counter := 0;
+  LET should_raise_exception := true;
+  IF (should_raise_exception) THEN
+    RAISE my_exception;
+  END IF;
+  counter := counter + 1;
+  RETURN counter;
+END
+
+error Uncaught exception of type 'MY_EXCEPTION' on line 7 at position 4 : Raised MY_EXCEPTION.
+DECLARE
+  my_exception EXCEPTION (-20002, 'Raised MY_EXCEPTION.');
+BEGIN
+  LET counter := 0;
+  LET should_raise_exception := true;
+  IF (should_raise_exception) THEN
+    RAISE my_exception;
+  END IF;
+  counter := counter + 1;
+  RETURN counter;
+END
+
+error 002003
+BEGIN
+  SELECT * FROM non_existent_table;
+END
+
+query
+BEGIN
+  SELECT 1 / 0;
+  RETURN 'If you see this, the exception was not thrown/caught properly.';
+EXCEPTION
+  WHEN OTHER THEN NULL;
+END
+----
+NULL
+
+statement ok
+CREATE OR REPLACE TABLE my_values (value NUMBER)
+
+query
+BEGIN
+  LET sql_row_count_var INT := 0;
+  INSERT INTO my_values VALUES (1), (2), (3);
+  sql_row_count_var := SQLROWCOUNT;
+  SELECT * from my_values;
+  RETURN sql_row_count_var;
+END
+----
+3
+
+query
+BEGIN
+  LET sql_row_count_var INT := 0;
+  LET sql_found_var BOOLEAN := NULL;
+  LET sql_notfound_var BOOLEAN := NULL;
+  IF ((SELECT MAX(value) FROM my_values) > 2) THEN
+    UPDATE my_values SET value = 4 WHERE value < 3;
+    sql_row_count_var := SQLROWCOUNT;
+    sql_found_var := SQLFOUND;
+    sql_notfound_var := SQLNOTFOUND;
+  END IF;
+  SELECT * from my_values;
+  IF (sql_found_var = true) THEN
+    RETURN 'Updated ' || sql_row_count_var || ' rows.';
+  ELSEIF (sql_notfound_var = true) THEN
+    RETURN 'No rows updated.';
+  ELSE
+    RETURN 'No DML statements executed.';
+  END IF;
+END
+----
+Updated 2 rows.
+
+query
+BEGIN
+  INSERT INTO my_values VALUES (1), (2), (3);
+  LET insert_count INT := ACTIVITY_COUNT;
+  SELECT * FROM my_values WHERE value > 1;
+  LET select_count INT := ACTIVITY_COUNT;
+  RETURN 'Inserted ' || insert_count || ' rows, query returned ' || select_count || ' rows.';
+END
+----
+Inserted 3 rows, query returned 5 rows.
+
+query
+DECLARE
+  v1 VARCHAR DEFAULT 'CREATE TABLE temporary1 (i INTEGER)';
+  v2 VARCHAR DEFAULT 'INSERT INTO temporary1 (i) VALUES (76)';
+  result INTEGER DEFAULT 0;
+BEGIN
+  EXECUTE IMMEDIATE v1;
+  EXECUTE IMMEDIATE v2  ||  ',(80)'  ||  ',(84)';
+  result := (SELECT SUM(i) FROM temporary1);
+  RETURN result::VARCHAR;
+END
+----
+240
+
+statement ok
+SET stmt = $$ SELECT PI(); $$
+
+query
+EXECUTE IMMEDIATE $stmt
+----
+3.141592653589793
+
+query
+DECLARE
+  q VARCHAR DEFAULT 'SELECT COUNT(*) FROM some_data WHERE id > ?';
+  low INTEGER DEFAULT 1;
+  n INTEGER;
+BEGIN
+  EXECUTE IMMEDIATE :q USING (low);
+  SELECT COUNT(*) INTO :n FROM some_data WHERE id > :low;
+  RETURN n;
+END
+----
+1
+
+query
+BEGIN
+  BEGIN TRANSACTION;
+  INSERT INTO some_data VALUES (3, 'c');
+  ROLLBACK;
+  RETURN (SELECT COUNT(*) FROM some_data);
+END
+----
+2

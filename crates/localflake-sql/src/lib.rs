@@ -19,6 +19,7 @@ mod match_recognize;
 mod meta;
 mod normalize;
 mod rewrite;
+pub mod scripting;
 pub mod stage;
 mod translate;
 mod types;

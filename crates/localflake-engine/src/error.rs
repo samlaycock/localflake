@@ -72,6 +72,35 @@ impl EngineError {
         )
     }
 
+    /// An error with a code that isn't a literal (user exceptions' -20000..-20999).
+    pub(crate) fn scripting(code: &'static str, sql_state: &'static str, message: impl Into<String>) -> Self {
+        Self::new(code, sql_state, message)
+    }
+
+    pub(crate) fn undeclared_variable(name: &str) -> Self {
+        Self::compilation("002211", "02000", format!("variable '{name}' is not declared"))
+    }
+
+    pub(crate) fn undeclared_exception(name: &str) -> Self {
+        Self::compilation("002211", "02000", format!("exception '{name}' is not declared"))
+    }
+
+    pub(crate) fn invalid_loop_bound(expr: &str) -> Self {
+        Self::new("100038", "22018", format!("loop bound '{expr}' is not an integer"))
+    }
+
+    pub(crate) fn raise_outside_handler() -> Self {
+        Self::compilation("002211", "42601", "RAISE without an exception name is only allowed in an exception handler")
+    }
+
+    pub(crate) fn select_into_rows() -> Self {
+        Self::new("100167", "21000", "SELECT INTO returned more than one row")
+    }
+
+    pub(crate) fn execute_immediate_null() -> Self {
+        Self::new("100039", "22004", "EXECUTE IMMEDIATE statement is NULL")
+    }
+
     pub(crate) fn invalid_parameter(name: &str, value: &str) -> Self {
         Self::new("002043", "42601", format!("SQL compilation error:\ninvalid value [{value}] for parameter '{name}'"))
     }
