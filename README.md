@@ -154,9 +154,11 @@ offline.
   blocks included. The editor highlights SQL and completes names: databases,
   schemas, tables, and columns, including after a table alias. A long query
   can be cancelled.
-- **Results.** A grid that loads more rows as you scroll, shows each column's
-  Snowflake type, and displays values as Snowflake's worksheets do
-  (`TIMESTAMP_LTZ` in the session's time zone, `VARIANT` as JSON). Sort and
+- **Results.** A grid that loads more rows as you scroll and shows each
+  column's Snowflake type. Values are shown as text: timestamps as
+  `2024-01-02 03:04:05.123 -0800` (`TIMESTAMP_LTZ` in the session's time
+  zone, with every significant fractional digit) and `VARIANT` as JSON. The
+  grid doesn't follow the `*_OUTPUT_FORMAT` session parameters. Sort and
   filter rows, open a value to see all of it, and copy or download rows as
   CSV, TSV or JSON. A multi-statement run shows each statement's result,
   including those before one that failed.
@@ -165,8 +167,9 @@ offline.
   counts. From there you can preview data, describe or drop objects, truncate
   tables, insert names and statement templates into the worksheet, upload
   files to stages and download them, and load a CSV, JSON or Parquet file
-  into a table. Each action shows the SQL it runs, and it runs in your
-  worksheet's session, so it's in the history too.
+  into a table. Drops, truncates and file loads show their SQL before they
+  run. Every action runs in your worksheet's session, so it's in the history
+  too.
 - **Saved queries.** `Cmd/Ctrl+S` saves the worksheet's SQL. Saved queries are
   kept in the browser, and can be exported to and imported from JSON files.
 - **Query history.** Every statement from every client (your application's
@@ -176,8 +179,9 @@ offline.
   it to, which is the place to start when localflake disagrees with
   Snowflake, and its result while localflake still keeps it (the most recent
   500, as for `RESULT_SCAN`). Running statements can be cancelled, and any
-  statement can be opened in a worksheet. The last 2,000 statements are kept,
-  in memory.
+  statement can be opened in a worksheet. The history is kept in memory: the
+  last 2,000 statements, or fewer when statements are very large (it holds
+  at most 64 MB of SQL).
 - **Sessions.** The connected clients with their context and activity. Ending a
   session makes its client's next request fail with Snowflake's "session no
   longer exists" error (390111), for testing how an application reconnects.
@@ -437,7 +441,8 @@ list.
 | `--ui` | `LOCALFLAKE_UI` | `true` | Serve the [web UI](#web-ui) at `/__localflake/ui/` (and redirect `/` to it) |
 
 Logging uses `RUST_LOG`. For example, `RUST_LOG=localflake_engine=debug` logs
-the DuckDB SQL each statement is translated to.
+the DuckDB SQL each statement is translated to (the web UI's query history
+shows it too).
 
 ### Time zones
 
