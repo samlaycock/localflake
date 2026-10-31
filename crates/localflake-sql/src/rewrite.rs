@@ -692,7 +692,7 @@ impl Rewriter<'_> {
         }
         let target = types::map_type(data_type, self.ctx)?;
         // VARIANT inputs convert through their text, e.g. '"2024-01-01"'::DATE.
-        let convert = |name: &str, inner: Expr| {
+        let convert_with = |name: &str, inner: Expr, wrap: &dyn Fn(Expr) -> Expr| {
             let is_variant = binop(func("typeof", vec![inner.clone()]), BinaryOperator::Eq, string("VARIANT"));
             // Conversions to NTZ and DATE see TIMESTAMP_LTZ in the session's time zone.
             let zone =
@@ -701,6 +701,7 @@ impl Rewriter<'_> {
             let from_text = call(cast(inner.clone(), DataType::Varchar(None)));
             wrap(case(vec![(is_variant, from_text)], Some(call(inner))))
         };
+        let convert = |name: &str, inner: Expr| convert_with(name, inner, &wrap);
         let semi_structured = matches!(&target, DataType::Custom(name, _) if matches!(name.to_string().as_str(), "VARIANT" | "JSON" | "VARIANT[]"));
         if semi_structured {
             return Ok(wrap(match target.to_string().as_str() {
@@ -716,6 +717,8 @@ impl Rewriter<'_> {
             DataType::Timestamp(_, TimezoneInfo::None) => convert("sf_to_timestamp", inner),
             DataType::Timestamp(_, _) => convert("sf_ltz", inner),
             DataType::Date => convert("sf_to_date", inner),
+            // sf_to_boolean raises errors, which makes it volatile, and DuckDB's try() rejects volatile functions.
+            DataType::Boolean if try_ => convert_with("sf_try_to_boolean", inner, &|e| e),
             DataType::Boolean => convert("sf_to_boolean", inner),
             _ => Expr::Cast {
                 kind: if try_ { CastKind::TryCast } else { CastKind::Cast },

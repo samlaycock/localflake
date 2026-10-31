@@ -193,6 +193,24 @@ select * from jt order by id
 2|b,c
 
 statement ok
+create stage hs
+
+statement ok
+copy into @hs from (select id, name, id = 1 as flag from src) file_format = (type = csv) header = true
+
+statement ok
+create table ht (flag boolean, missing int, id int, name varchar)
+
+statement ok
+copy into ht from @hs file_format = (type = csv parse_header = true) match_by_column_name = case_insensitive
+
+query
+select * from ht order by id
+----
+true|NULL|1|a
+false|NULL|2|b,c
+
+statement ok
 create table jv (v variant)
 
 statement ok
