@@ -10,6 +10,7 @@ mod encode;
 mod error;
 mod files;
 mod functions;
+mod history;
 mod match_recognize;
 mod probe;
 mod procedures;
@@ -35,6 +36,7 @@ use localflake_sql::{Command, Context, SqlCommand, TimestampMapping, UseTarget};
 pub use cancel::CancelToken;
 pub use encode::{Column, QueryResult, SfType};
 pub use error::EngineError;
+pub use history::{HistoryPage, QueryRecord, QueryStatus};
 pub use stage::Transfer;
 
 const DEFAULT_SCHEMA: &str = "PUBLIC";
@@ -118,6 +120,7 @@ struct Inner {
     create_missing_databases: std::sync::atomic::AtomicBool,
     stages: stage::StageStore,
     running: Arc<cancel::Running>,
+    history: history::History,
 }
 
 struct RawDatabase(duckdb::ffi::duckdb_database);
@@ -160,6 +163,11 @@ pub struct SessionOptions {
     pub warehouse: Option<String>,
     pub role: Option<String>,
     pub parameters: Vec<(String, String)>,
+    /// The client opening the session (a driver's application ID), for the query history.
+    pub client: String,
+    /// Internal sessions (the web UI's object explorer) don't record their
+    /// statements in the query history or keep their results.
+    pub internal: bool,
 }
 
 /// A bind value from the driver.
@@ -345,6 +353,7 @@ impl Engine {
                 create_missing_databases: std::sync::atomic::AtomicBool::new(true),
                 stages: stage::StageStore::open(data_dir).map_err(EngineError::internal)?,
                 running,
+                history: Default::default(),
             }),
         })
     }
@@ -380,6 +389,9 @@ impl Engine {
             temporary_files: vec![],
             load_tables: 0,
             load_table_names: vec![],
+            client: options.client,
+            internal: options.internal,
+            duckdb_log: Default::default(),
         };
         session.set_parameters(parameters)?;
         if let Some(database) = options.database {
@@ -411,9 +423,34 @@ impl Engine {
         self.inner.running.cancel_query(query_id)
     }
 
+    /// Cancels every running statement of a session, returning how many there were.
+    pub fn cancel_session(&self, session_id: u64) -> usize {
+        self.inner.running.cancel_session(session_id)
+    }
+
     /// A stored result by query ID.
     pub fn result(&self, query_id: &str) -> Option<StoredResult> {
         self.inner.results.lock().unwrap().results.get(query_id).cloned()
+    }
+
+    /// Query history records changed after the sequence number `since` (all for 0).
+    pub fn history(&self, since: u64) -> HistoryPage {
+        self.inner.history.page(since)
+    }
+
+    /// A query history record by query ID.
+    pub fn history_record(&self, query_id: &str) -> Option<QueryRecord> {
+        self.inner.history.get(query_id)
+    }
+
+    /// Forgets the finished statements in the query history.
+    pub fn clear_history(&self) {
+        self.inner.history.clear();
+    }
+
+    /// The directory databases persist in, if any.
+    pub fn data_dir(&self) -> Option<&Path> {
+        self.inner.data_dir.as_deref()
     }
 
     fn store(&self, query_id: &str, result: StoredResult) {
@@ -441,6 +478,11 @@ pub struct Session {
     /// Counter naming the temp tables that hold staged files during a statement.
     load_tables: u64,
     load_table_names: Vec<String>,
+    /// See `SessionOptions::client` and `SessionOptions::internal`.
+    client: String,
+    internal: bool,
+    /// The DuckDB SQL the current statement has run, for the query history.
+    duckdb_log: history::DuckdbLog,
 }
 
 impl Drop for Session {
@@ -457,6 +499,13 @@ impl Drop for Session {
 pub struct Failure {
     pub query_id: String,
     pub error: EngineError,
+    /// The results of the request's statements before the one that failed.
+    pub completed: Vec<Arc<QueryResult>>,
+}
+
+/// The byte range of each statement in Snowflake SQL text, as written.
+pub fn statement_ranges(sql: &str) -> Result<Vec<std::ops::Range<usize>>, EngineError> {
+    Ok(localflake_sql::statement_ranges(sql)?)
 }
 
 impl Session {
@@ -490,7 +539,7 @@ impl Session {
     /// Runs a request, returning one result per statement. Results (and
     /// failures) are stored under their query IDs.
     pub fn execute(&mut self, request: &Request) -> Result<Vec<Arc<QueryResult>>, Failure> {
-        let statements = localflake_sql::split(request.sql).map_err(|e| self.fail(e.into()))?;
+        let statements = localflake_sql::split(request.sql).map_err(|e| self.fail(request.sql, e.into()))?;
         // A single statement is reported as sent, with any trailing semicolon.
         let original = match statements.len() {
             1 => vec![request.sql.trim().to_owned()],
@@ -500,7 +549,7 @@ impl Session {
             self.ctx.parameters.get("MULTI_STATEMENT_COUNT").and_then(|v| v.parse().ok()).unwrap_or(1)
         });
         if desired != 0 && statements.len() != desired {
-            return Err(self.fail(EngineError::statement_count(statements.len(), desired)));
+            return Err(self.fail(request.sql, EngineError::statement_count(statements.len(), desired)));
         }
         let timeout = self.statement_timeout();
         let mut results = Vec::with_capacity(statements.len());
@@ -508,11 +557,12 @@ impl Session {
             self.ctx.statement = original.get(i).cloned().unwrap_or_else(|| statement.clone());
             let query_id = new_query_id();
             let bindings = if statements.len() == 1 { request.bindings.as_slice() } else { &[] };
+            self.record_start(&query_id);
             let result = match request.cancel.error(timeout) {
                 Some(error) => Err(error),
                 None => self.run_cancellable(statement, &query_id, bindings, request, timeout).map(Arc::new),
             };
-            self.engine.store(&query_id, result.clone());
+            self.record_finish(&query_id, &result);
             self.ctx.query_history.push(query_id.clone());
             match result {
                 Ok(result) => {
@@ -526,7 +576,7 @@ impl Session {
                 Err(error) => {
                     tracing::debug!(%query_id, %statement, %error, "statement failed");
                     self.recover_transaction();
-                    return Err(Failure { query_id, error });
+                    return Err(Failure { query_id, error, completed: results });
                 }
             }
         }
@@ -655,10 +705,43 @@ impl Session {
         self.ctx.parameters.get("AUTOCOMMIT").is_none_or(|v| !v.eq_ignore_ascii_case("false"))
     }
 
-    fn fail(&mut self, error: EngineError) -> Failure {
+    /// Fails a request that can't run at all (it doesn't parse, or has the wrong statement count).
+    fn fail(&mut self, sql: &str, error: EngineError) -> Failure {
         let query_id = new_query_id();
-        self.engine.store(&query_id, Err(error.clone()));
-        Failure { query_id, error }
+        self.ctx.statement = sql.trim().to_owned();
+        self.record_start(&query_id);
+        let result = Err(error.clone());
+        self.record_finish(&query_id, &result);
+        Failure { query_id, error, completed: vec![] }
+    }
+
+    /// Records a statement starting in the query history (see `ctx.statement`).
+    fn record_start(&mut self, query_id: &str) {
+        if self.internal {
+            return;
+        }
+        self.engine.inner.history.start(history::Started {
+            query_id,
+            session_id: self.ctx.session_id,
+            user: &self.ctx.user,
+            client: &self.client,
+            database: self.ctx.database.as_deref(),
+            schema: self.ctx.schema.as_deref(),
+            query_tag: self.ctx.parameters.get("QUERY_TAG").map(String::as_str),
+            timezone: self.ctx.parameters.get("TIMEZONE").map(String::as_str),
+            sql: &self.ctx.statement,
+        });
+        self.duckdb_log.start();
+    }
+
+    /// Stores a statement's result and records its outcome in the query history.
+    fn record_finish(&mut self, query_id: &str, result: &StoredResult) {
+        if self.internal {
+            return;
+        }
+        self.engine.store(query_id, result.clone());
+        let outcome = result.as_ref().map(|r| (r.kind, rows_affected(r)));
+        self.engine.inner.history.finish(query_id, outcome, self.duckdb_log.take());
     }
 
     fn run_statement(
@@ -858,6 +941,7 @@ impl Session {
         query_id: &str,
     ) -> Result<QueryResult, EngineError> {
         tracing::debug!(sql = %command.sql, kind = ?command.kind, "duckdb");
+        self.duckdb_log.push(&command.sql);
         let expanded;
         let command = if command.sql.contains("__lf_procedures") {
             expanded = SqlCommand { sql: self.expand_procedures(&command.sql)?, ..command.clone() };
@@ -1323,6 +1407,15 @@ fn duckdb_type(data_type: &DataType) -> String {
         DataType::Binary | DataType::LargeBinary => "BLOB".into(),
         _ => "VARCHAR".into(),
     }
+}
+
+/// The rows a statement returned, or for DML the rows it changed (the sum of its row counts).
+fn rows_affected(result: &QueryResult) -> usize {
+    if !result.kind.is_dml() {
+        return result.row_count();
+    }
+    let counts = result.json_rows().ok().and_then(|rows| rows.into_iter().next()).unwrap_or_default();
+    counts.iter().flatten().filter_map(|n| n.parse::<usize>().ok()).sum()
 }
 
 fn new_query_id() -> String {

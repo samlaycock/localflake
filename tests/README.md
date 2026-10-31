@@ -40,6 +40,13 @@ The spec covers:
 - Snowflake Scripting: bare blocks and `EXECUTE IMMEDIATE $$...$$`, a block
   inside a multi-statement request, async blocks, and uncaught exceptions
 
+## Web UI
+
+`tests/python/test_web_ui.py` covers the web UI's page and JSON API: running
+statements, paging results, the query history (including statements from the
+Python connector), the catalog, stage uploads and downloads, and ending
+sessions.
+
 ## Driver-specific tests
 
 Driver APIs that SQL can't express are tested in each suite's own files

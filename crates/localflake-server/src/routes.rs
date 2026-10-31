@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::protocol::{
     Envelope, LoginParams, LoginRequest, QUERY_IN_PROGRESS_ASYNC, QueryRequest, ResultFormat, SessionInfo, bind_rows,
-    multi_statement_response, parameters_json, query_response, transfer_response,
+    multi_statement_response, now_millis, parameters_json, query_response, transfer_response,
 };
 
 /// Snowflake's "session no longer exists, new login required" code.
@@ -25,20 +25,108 @@ const SERVER_VERSION: &str = concat!("localflake-", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone)]
 pub struct AppState {
-    engine: Engine,
-    sessions: Arc<Mutex<HashMap<String, Arc<Mutex<ClientSession>>>>>,
+    pub(crate) engine: Engine,
+    /// Logged-in sessions (drivers and the web UI's worksheets) by session token.
+    pub(crate) sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
     /// Parent query ID of a multi-statement request → its statements' results.
     multi_statement: Arc<Mutex<HashMap<String, Vec<Arc<QueryResult>>>>>,
     /// Requests in progress by the driver's `requestId`: the session token that sent each and its cancel token.
-    requests: Arc<Mutex<HashMap<String, (String, CancelToken)>>>,
+    pub(crate) requests: Arc<Mutex<HashMap<String, (String, CancelToken)>>>,
     forced_format: Option<ResultFormat>,
+    /// Milliseconds since the Unix epoch.
+    pub(crate) started_at: u64,
+    /// The web UI's object explorer session (see `ui::with_explorer`).
+    pub(crate) explorer: Arc<Mutex<Option<Session>>>,
 }
 
-struct ClientSession {
-    id: u64,
+/// A logged-in session, and a summary of it that the web UI can read while
+/// the session is busy running a statement.
+#[derive(Clone)]
+pub(crate) struct SessionEntry {
+    pub client: Arc<Mutex<ClientSession>>,
+    pub summary: Arc<Mutex<SessionSummary>>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionSummary {
+    pub id: u64,
+    pub user: String,
+    pub client: String,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    /// Milliseconds since the Unix epoch.
+    pub logged_in_at: u64,
+    pub last_active_at: u64,
+    pub requests: u64,
+    pub running: bool,
+    pub web_ui: bool,
+}
+
+impl SessionEntry {
+    /// Marks the session as running a request.
+    pub fn begin(&self) {
+        let mut summary = self.summary.lock().unwrap();
+        summary.running = true;
+        summary.requests += 1;
+        summary.last_active_at = now_millis() as u64;
+    }
+
+    /// Marks the request as finished, recording the session's context after it.
+    pub fn end(&self, client: &ClientSession) {
+        let ctx = client.session.context();
+        let mut summary = self.summary.lock().unwrap();
+        summary.running = false;
+        summary.database = ctx.database.clone();
+        summary.schema = ctx.schema.clone();
+        summary.last_active_at = now_millis() as u64;
+    }
+}
+
+pub(crate) struct ClientSession {
+    pub id: u64,
     master_token: String,
-    app: String,
-    session: Session,
+    pub app: String,
+    pub session: Session,
+}
+
+/// Starts a session and registers it under a new session token.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn open_session(
+    state: &AppState,
+    options: SessionOptions,
+    web_ui: bool,
+) -> Result<(String, SessionEntry), Response> {
+    let user = options.user.clone();
+    let app = options.client.clone();
+    let engine = state.engine.clone();
+    let session = match tokio::task::spawn_blocking(move || engine.session(options)).await {
+        Ok(Ok(session)) => session,
+        Ok(Err(err)) => return Err(Json(Envelope::engine_error(&err, "")).into_response()),
+        Err(err) => return Err(internal(err)),
+    };
+    let token = format!("ver:1-hint:0-ETMsDgAAA{}", Uuid::new_v4().simple());
+    let master_token = format!("ver:1-hint:0-ETMsDgAAB{}", Uuid::new_v4().simple());
+    let ctx = session.context();
+    let now = now_millis() as u64;
+    let summary = SessionSummary {
+        id: ctx.session_id,
+        user,
+        client: app.clone(),
+        database: ctx.database.clone(),
+        schema: ctx.schema.clone(),
+        logged_in_at: now,
+        last_active_at: now,
+        requests: 0,
+        running: false,
+        web_ui,
+    };
+    let entry = SessionEntry {
+        client: Arc::new(Mutex::new(ClientSession { id: ctx.session_id, master_token, app, session })),
+        summary: Arc::new(Mutex::new(summary)),
+    };
+    state.sessions.lock().unwrap().insert(token.clone(), entry.clone());
+    Ok((token, entry))
 }
 
 impl ClientSession {
@@ -77,15 +165,17 @@ impl ClientSession {
     }
 }
 
-pub fn router(engine: Engine, forced_format: Option<ResultFormat>) -> Router {
+pub fn router(engine: Engine, forced_format: Option<ResultFormat>, web_ui: bool) -> Router {
     let state = AppState {
         engine,
         sessions: Default::default(),
         multi_statement: Default::default(),
         requests: Default::default(),
         forced_format,
+        started_at: now_millis() as u64,
+        explorer: Default::default(),
     };
-    Router::new()
+    let router = Router::new()
         .route("/session/v1/login-request", post(login))
         .route("/session/token-request", post(renew_token))
         .route("/session/heartbeat", post(ok))
@@ -104,8 +194,9 @@ pub fn router(engine: Engine, forced_format: Option<ResultFormat>) -> Router {
             "/__localflake/files/{*path}",
             get(download_file).head(download_file).put(upload_file).layer(DefaultBodyLimit::disable()),
         )
-        .fallback(unknown)
-        .with_state(state)
+        .fallback(unknown);
+    let router = if web_ui { router.merge(crate::ui::router()) } else { router };
+    router.with_state(state)
 }
 
 async fn login(State(state): State<AppState>, Query(params): Query<LoginParams>, body: Bytes) -> Response {
@@ -130,17 +221,15 @@ async fn login(State(state): State<AppState>, Query(params): Query<LoginParams>,
             .iter()
             .map(|(k, v)| (k.clone(), v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())))
             .collect(),
+        client: app,
+        internal: false,
     };
-    let engine = state.engine.clone();
-    let session = match tokio::task::spawn_blocking(move || engine.session(options)).await {
-        Ok(Ok(session)) => session,
-        Ok(Err(err)) => return Json(Envelope::engine_error(&err, "")).into_response(),
-        Err(err) => return internal(err),
+    let (token, entry) = match open_session(&state, options, false).await {
+        Ok(opened) => opened,
+        Err(response) => return response,
     };
-
-    let token = format!("ver:1-hint:0-ETMsDgAAA{}", Uuid::new_v4().simple());
-    let master_token = format!("ver:1-hint:0-ETMsDgAAB{}", Uuid::new_v4().simple());
-    let client = ClientSession { id: session.context().session_id, master_token: master_token.clone(), app, session };
+    let client = entry.client.lock().unwrap();
+    let master_token = client.master_token.clone();
     tracing::info!(session = client.id, %user, app = %client.app, database = ?client.session.context().database, "login");
 
     let info = client.info();
@@ -170,7 +259,6 @@ async fn login(State(state): State<AppState>, Query(params): Query<LoginParams>,
         "mfaToken": null,
         "mfaTokenValidityInSeconds": 0,
     });
-    state.sessions.lock().unwrap().insert(token, Arc::new(Mutex::new(client)));
     Json(Envelope::ok(data)).into_response()
 }
 
@@ -180,7 +268,7 @@ async fn renew_token(State(state): State<AppState>, headers: HeaderMap) -> Respo
     let Some(master) = auth_token(&headers) else { return session_gone() };
     let sessions = state.sessions.lock().unwrap();
     let found = sessions.iter().find_map(|(token, s)| {
-        let s = s.lock().unwrap();
+        let s = s.client.lock().unwrap();
         (s.master_token == master).then(|| (token.clone(), s.id))
     });
     let Some((token, id)) = found else { return session_gone() };
@@ -196,9 +284,9 @@ async fn renew_token(State(state): State<AppState>, headers: HeaderMap) -> Respo
 
 async fn delete_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = auth_token(&headers)
-        && let Some(client) = state.sessions.lock().unwrap().remove(&token)
+        && let Some(entry) = state.sessions.lock().unwrap().remove(&token)
     {
-        tracing::info!(session = client.lock().unwrap().id, "logout");
+        tracing::info!(session = entry.summary.lock().unwrap().id, "logout");
     }
     Json(Envelope::ok(Value::Null)).into_response()
 }
@@ -209,7 +297,7 @@ async fn query(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(client) = client_for(&state, &headers) else { return session_gone() };
+    let Some(entry) = client_for(&state, &headers) else { return session_gone() };
     let request: QueryRequest = match decode(&body) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -239,7 +327,8 @@ async fn query(
         .map(|(id, session)| RequestGuard::start(&state.requests, id, session, &cancel));
     let response = tokio::task::spawn_blocking(move || {
         let _request = request_guard;
-        let mut client = client.lock().unwrap();
+        entry.begin();
+        let mut client = entry.client.lock().unwrap();
         tracing::info!(session = client.id, sql = %request.sql_text, "query");
         let outcome = client.session.execute(&Request {
             sql: &request.sql_text,
@@ -248,6 +337,7 @@ async fn query(
             statement_count: statement_count.map(|n| n as usize),
             cancel,
         });
+        entry.end(&client);
         let results = match outcome {
             Ok(results) => results,
             Err(failure) => {
@@ -297,13 +387,13 @@ struct RequestParams {
 }
 
 /// Removes a request from `AppState::requests` when it finishes.
-struct RequestGuard {
+pub(crate) struct RequestGuard {
     requests: Arc<Mutex<HashMap<String, (String, CancelToken)>>>,
     request_id: String,
 }
 
 impl RequestGuard {
-    fn start(
+    pub fn start(
         requests: &Arc<Mutex<HashMap<String, (String, CancelToken)>>>,
         request_id: String,
         session: String,
@@ -361,7 +451,7 @@ async fn query_result(State(state): State<AppState>, headers: HeaderMap, Path(qu
     let client = client_for(&state, &headers);
     let (format, info_parameters) = match &client {
         Some(c) => {
-            let c = c.lock().unwrap();
+            let c = c.client.lock().unwrap();
             (c.format(state.forced_format), Some(c.session.client_parameters()))
         }
         None => (state.forced_format.unwrap_or(ResultFormat::Json), None),
@@ -498,7 +588,7 @@ async fn unknown(uri: Uri) -> Response {
     (StatusCode::NOT_FOUND, Json(Envelope::error("000404", message, Value::Null))).into_response()
 }
 
-fn client_for(state: &AppState, headers: &HeaderMap) -> Option<Arc<Mutex<ClientSession>>> {
+fn client_for(state: &AppState, headers: &HeaderMap) -> Option<SessionEntry> {
     auth_token(headers).and_then(|t| state.sessions.lock().unwrap().get(&t).cloned())
 }
 
@@ -537,7 +627,7 @@ fn session_gone() -> Response {
     Json(Envelope::error(SESSION_GONE, message, Value::Null)).into_response()
 }
 
-fn internal(err: impl std::fmt::Display) -> Response {
+pub(crate) fn internal(err: impl std::fmt::Display) -> Response {
     tracing::error!(%err, "internal error");
     (StatusCode::INTERNAL_SERVER_ERROR, Json(Envelope::error("000603", err.to_string(), Value::Null))).into_response()
 }

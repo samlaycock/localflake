@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>localflake</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script>
+    // Apply the theme before the page renders, so it doesn't flash.
+    document.documentElement.dataset.theme = localStorage.getItem("localflake.theme")
+      || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <div class="brand"><img src="favicon.svg" alt="">localflake <span class="version" id="version"></span></div>
+      <nav class="views">
+        <button data-view="worksheets" class="active">Worksheets</button>
+        <button data-view="history">Query history <span class="count" id="running-count" hidden></span></button>
+        <button data-view="sessions">Sessions <span class="count" id="session-count"></span></button>
+      </nav>
+      <div class="spacer"></div>
+      <span class="badge" id="storage-badge"></span>
+      <button class="icon-btn" id="shortcuts-btn" title="Keyboard shortcuts (?)"></button>
+      <button class="icon-btn" id="theme-btn" title="Toggle theme"></button>
+    </header>
+    <main>
+      <section class="view worksheets" id="view-worksheets"></section>
+      <section class="view history" id="view-history" hidden></section>
+      <section class="view sessions" id="view-sessions" hidden></section>
+    </main>
+  </div>
+  <div class="toasts" id="toasts"></div>
+  <script src="app.js"></script>
+</body>
+</html>

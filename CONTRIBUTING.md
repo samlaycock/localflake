@@ -11,7 +11,7 @@ the result real Snowflake gives (or the documentation page that describes it).
 
 | Crate | Role |
 |---|---|
-| `localflake-server` | Driver protocol over HTTP (axum): login, sessions, `query-request`, response encoding |
+| `localflake-server` | Driver protocol over HTTP (axum): login, sessions, `query-request`, response encoding. Also the web UI: the page in `ui/` (plain HTML, CSS and JavaScript, embedded in the binary) and its JSON API in `src/ui.rs` |
 | `localflake-engine` | DuckDB sessions, Snowflake databases as attached DuckDB catalogs, result encoding, error code mapping |
 | `localflake-sql` | Snowflake SQL → DuckDB: identifier case normalization, parsing (sqlparser-rs), statement classification and rewrites |
 
@@ -28,7 +28,13 @@ Node.js is needed for changesets.
 cargo run -- --addr 127.0.0.1:8080                  # in memory
 cargo run -- --data-dir ./data                      # one DuckDB file per database
 RUST_LOG=localflake_engine=debug cargo run          # log translated SQL
+LOCALFLAKE_UI_DIR=crates/localflake-server/ui cargo run   # serve the web UI's files from disk
 ```
+
+The web UI's files are embedded at build time. While working on them, set
+`LOCALFLAKE_UI_DIR` so a browser reload picks up changes without a rebuild.
+The page has no build step or dependencies: keep it that way, so localflake
+never needs the network.
 
 Builds compile DuckDB from source by default (the engine's `bundled` feature),
 which takes several minutes. To link DuckDB's prebuilt library instead, as CI

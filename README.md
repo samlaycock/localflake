@@ -26,6 +26,9 @@ code changes are needed.
   `RESULT_SCAN`.**
 - **One binary or Docker image, in memory or persistent.** Optionally keeps one
   DuckDB file per database, and never needs the network at runtime.
+- **A web UI for looking inside.** SQL worksheets, an object explorer and saved
+  queries, plus the history of every statement your application's drivers
+  run, with the DuckDB SQL each was translated to.
 
 > [!WARNING]
 > localflake is for development and testing only. It accepts any credentials,
@@ -38,6 +41,7 @@ code changes are needed.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Supported drivers](#supported-drivers)
+- [Web UI](#web-ui)
 - [What works](#what-works)
 - [Stages and file transfer](#stages-and-file-transfer)
 - [How Snowflake types are stored](#how-snowflake-types-are-stored)
@@ -122,6 +126,9 @@ db, _ := sql.Open("snowflake", dsn)
 In Docker Compose or CI, run the image as a service and use its hostname as
 `host`.
 
+To see what's inside, open <http://127.0.0.1:8080/> in a browser (see
+[Web UI](#web-ui)).
+
 ## Supported drivers
 
 | Driver | Tested version | Result formats |
@@ -134,6 +141,51 @@ These run in CI against every change. Other drivers that speak the same
 protocol (JDBC, ODBC, .NET) may work but aren't tested yet. See
 [`tests/README.md`](tests/README.md) for what the suites cover and the known
 differences between drivers.
+
+## Web UI
+
+localflake serves a web UI at <http://127.0.0.1:8080/> (`/__localflake/ui/`),
+from the same port as the driver protocol. It's built into the binary and works
+offline.
+
+- **Worksheets.** Write and run SQL in tabs, each with its own session and
+  database and schema. `Cmd/Ctrl+Enter` runs the statement at the cursor (or
+  the selection) and `Cmd/Ctrl+Shift+Enter` runs them all, Snowflake Scripting
+  blocks included. The editor highlights SQL and completes names: databases,
+  schemas, tables, and columns, including after a table alias. A long query
+  can be cancelled.
+- **Results.** A grid that loads more rows as you scroll, shows each column's
+  Snowflake type, and displays values as Snowflake's worksheets do
+  (`TIMESTAMP_LTZ` in the session's time zone, `VARIANT` as JSON). Sort and
+  filter rows, open a value to see all of it, and copy or download rows as
+  CSV, TSV or JSON. A multi-statement run shows each statement's result,
+  including those before one that failed.
+- **Object explorer.** Databases, schemas, tables, views, procedures,
+  functions, stages, sequences and file formats, with their columns and row
+  counts. From there you can preview data, describe or drop objects, truncate
+  tables, insert names and statement templates into the worksheet, upload
+  files to stages and download them, and load a CSV, JSON or Parquet file
+  into a table. Each action shows the SQL it runs, and it runs in your
+  worksheet's session, so it's in the history too.
+- **Saved queries.** `Cmd/Ctrl+S` saves the worksheet's SQL. Saved queries are
+  kept in the browser, and can be exported to and imported from JSON files.
+- **Query history.** Every statement from every client (your application's
+  drivers and the worksheets), updated live. It shows status, duration, rows,
+  session, client, user, context and `QUERY_TAG`, with error codes and
+  SQLSTATEs. Each statement also shows the DuckDB SQL localflake translated
+  it to, which is the place to start when localflake disagrees with
+  Snowflake, and its result while localflake still keeps it (the most recent
+  500, as for `RESULT_SCAN`). Running statements can be cancelled, and any
+  statement can be opened in a worksheet. The last 2,000 statements are kept,
+  in memory.
+- **Sessions.** The connected clients with their context and activity. Ending a
+  session makes its client's next request fail with Snowflake's "session no
+  longer exists" error (390111), for testing how an application reconnects.
+
+Like the driver protocol, the web UI has no authentication: anyone who can
+reach the port can use it. It refuses requests from other websites' pages.
+Worksheets log in as `WEB_UI` (for `CURRENT_USER()` and the user stage `@~`).
+Run with `--ui false` to turn the web UI off.
 
 ## What works
 
@@ -382,6 +434,7 @@ list.
 | `--data-dir` | `LOCALFLAKE_DATA_DIR` | unset (in memory) | Directory for persistent databases, one DuckDB file each, and staged files |
 | `--result-format` | `LOCALFLAKE_RESULT_FORMAT` | `auto` | `auto` uses Arrow for drivers that request it from Snowflake, `json` or `arrow` forces one |
 | `--missing-database` | `LOCALFLAKE_MISSING_DATABASE` | `create` | Logging in with an unknown database creates it, or `ignore` logs in without a current database, as Snowflake does |
+| `--ui` | `LOCALFLAKE_UI` | `true` | Serve the [web UI](#web-ui) at `/__localflake/ui/` (and redirect `/` to it) |
 
 Logging uses `RUST_LOG`. For example, `RUST_LOG=localflake_engine=debug` logs
 the DuckDB SQL each statement is translated to.
