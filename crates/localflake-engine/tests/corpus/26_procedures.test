@@ -1,0 +1,590 @@
+# Stored procedures written in Snowflake Scripting. Expected results are the
+# examples in Snowflake's stored procedure and Snowflake Scripting documentation.
+
+statement ok
+CREATE OR REPLACE PROCEDURE output_message(message VARCHAR)
+RETURNS VARCHAR NOT NULL
+LANGUAGE SQL
+AS
+BEGIN
+  RETURN message;
+END;
+
+query types
+CALL output_message('Hello World')
+----
+VARCHAR
+Hello World
+
+statement ok
+CREATE OR REPLACE PROCEDURE output_message(message VARCHAR)
+RETURNS VARCHAR NOT NULL
+LANGUAGE SQL
+AS
+$$
+BEGIN
+  RETURN message;
+END;
+$$
+
+query
+CALL output_message('Hello again')
+----
+Hello again
+
+statement ok
+CREATE OR REPLACE PROCEDURE return_greater(number_1 INTEGER, number_2 INTEGER)
+RETURNS INTEGER NOT NULL
+LANGUAGE SQL
+AS
+BEGIN
+  IF (number_1 > number_2) THEN
+    RETURN number_1;
+  ELSE
+    RETURN number_2;
+  END IF;
+END;
+
+query types
+CALL return_greater(2, 3)
+----
+NUMBER(*,0)
+3
+
+statement ok
+CREATE OR REPLACE TABLE invoices (id INTEGER, price NUMBER(12, 2))
+
+statement ok
+INSERT INTO invoices (id, price) VALUES (1, 11.11), (2, 22.22)
+
+statement ok
+CREATE OR REPLACE PROCEDURE find_invoice_by_id(id VARCHAR)
+RETURNS TABLE (id INTEGER, price NUMBER(12,2))
+LANGUAGE SQL
+AS
+DECLARE
+  res RESULTSET DEFAULT (SELECT * FROM invoices WHERE id = :id);
+BEGIN
+  RETURN TABLE(res);
+END;
+
+query
+CALL find_invoice_by_id('2')
+----
+2|22.22
+
+statement ok
+CREATE OR REPLACE PROCEDURE get_row_count(table_name VARCHAR)
+RETURNS INTEGER NOT NULL
+LANGUAGE SQL
+AS
+DECLARE
+  row_count INTEGER DEFAULT 0;
+  res RESULTSET DEFAULT (SELECT COUNT(*) AS COUNT FROM IDENTIFIER(:table_name));
+  c1 CURSOR FOR res;
+BEGIN
+  FOR row_variable IN c1 DO
+    row_count := row_variable.count;
+  END FOR;
+  RETURN row_count;
+END;
+
+query
+CALL get_row_count('invoices')
+----
+2
+
+statement ok
+CREATE OR REPLACE PROCEDURE build_string_proc(
+    word1 VARCHAR,
+    word2 VARCHAR DEFAULT 'default_word2',
+    word3 VARCHAR DEFAULT 'default_word3')
+  RETURNS VARCHAR
+  LANGUAGE SQL
+AS
+BEGIN
+  RETURN word1 || '_' || word2 || '_' || word3;
+END;
+
+query
+CALL build_string_proc('hello')
+----
+hello_default_word2_default_word3
+
+query
+CALL build_string_proc('hello', 'world')
+----
+hello_world_default_word3
+
+query
+CALL build_string_proc(word3 => 'Morning', word1 => 'Good')
+----
+Good_default_word2_Morning
+
+error 001044
+CALL build_string_proc()
+
+error 001044
+CALL build_string_proc('a', 'b', 'c', 'd')
+
+error 002141
+CALL no_such_procedure()
+
+statement ok
+CREATE OR REPLACE PROCEDURE simple_out_sp_demo(xout OUT NUMBER)
+  RETURNS NUMBER
+  LANGUAGE SQL
+AS
+BEGIN
+  xout := 2;
+  RETURN xout;
+END;
+
+statement ok
+CREATE OR REPLACE PROCEDURE simple_out_sp_caller()
+  RETURNS NUMBER
+  LANGUAGE SQL
+AS
+BEGIN
+  LET x NUMBER := 1;
+  CALL simple_out_sp_demo(:x);
+  RETURN x;
+END;
+
+query
+CALL simple_out_sp_caller()
+----
+2
+
+statement ok
+CREATE OR REPLACE TABLE quarterly_sales(empid INT, amount INT, quarter TEXT)
+
+statement ok
+INSERT INTO quarterly_sales VALUES
+  (1, 10000, '2023_Q1'), (1, 400, '2023_Q1'), (2, 4500, '2023_Q1'), (2, 35000, '2023_Q1'),
+  (1, 5000, '2023_Q2'), (1, 3000, '2023_Q2'), (2, 200, '2023_Q2'), (2, 90500, '2023_Q2'),
+  (1, 6000, '2023_Q3'), (1, 5000, '2023_Q3'), (2, 2500, '2023_Q3'), (2, 9500, '2023_Q3'),
+  (3, 2700, '2023_Q3'), (1, 8000, '2023_Q4'), (1, 10000, '2023_Q4'), (2, 800, '2023_Q4'),
+  (2, 4500, '2023_Q4'), (3, 2700, '2023_Q4'), (3, 16000, '2023_Q4'), (3, 10200, '2023_Q4')
+
+statement ok
+CREATE OR REPLACE PROCEDURE sales_total_out_sp_demo(
+    id INT,
+    quarter VARCHAR(20),
+    total_sales OUT NUMBER(38,0))
+  RETURNS STRING
+  LANGUAGE SQL
+AS
+BEGIN
+  SELECT SUM(amount) INTO total_sales FROM quarterly_sales
+    WHERE empid = :id AND
+          quarter = :quarter;
+  RETURN 'Done';
+END;
+
+statement ok
+CREATE OR REPLACE PROCEDURE emp_quarter_calling_sp_demo(
+    id INT,
+    quarter VARCHAR(20))
+  RETURNS STRING
+  LANGUAGE SQL
+AS
+BEGIN
+  LET x NUMBER(38,0) := 0;
+  CALL sales_total_out_sp_demo(:id, :quarter, :x);
+  RETURN 'Total sales for employee ' || id || ' in quarter ' || quarter || ': ' || x;
+END;
+
+query
+CALL emp_quarter_calling_sp_demo(2, '2023_Q4')
+----
+Total sales for employee 2 in quarter 2023_Q4: 5300
+
+statement ok
+CREATE OR REPLACE PROCEDURE power_of_2()
+RETURNS NUMBER(8, 0)
+LANGUAGE SQL
+AS
+$$
+DECLARE
+  counter NUMBER(8, 0);
+  power_of_2 NUMBER(8, 0);
+BEGIN
+  counter := 1;
+  power_of_2 := 1;
+  WHILE (counter <= 8) DO
+    power_of_2 := power_of_2 * 2;
+    counter := counter + 1;
+  END WHILE;
+  RETURN power_of_2;
+END;
+$$
+
+query
+CALL power_of_2()
+----
+256
+
+# A procedure's value, INTO a caller's variable.
+query
+DECLARE
+  greater INTEGER;
+BEGIN
+  CALL return_greater(10, 7) INTO :greater;
+  RETURN greater * 2;
+END
+----
+20
+
+# A procedure's table, as a RESULTSET.
+query
+DECLARE
+  res RESULTSET DEFAULT (CALL find_invoice_by_id('1'));
+  c CURSOR FOR res;
+  total NUMBER(12, 2) DEFAULT 0;
+BEGIN
+  FOR r IN c DO
+    total := total + r.price;
+  END FOR;
+  RETURN total;
+END
+----
+11.11
+
+# Recursion.
+statement ok
+CREATE OR REPLACE PROCEDURE factorial(n INTEGER)
+RETURNS INTEGER
+LANGUAGE SQL
+AS
+DECLARE
+  result INTEGER;
+BEGIN
+  IF (n <= 1) THEN
+    RETURN 1;
+  END IF;
+  CALL factorial(:n - 1) INTO :result;
+  RETURN n * result;
+END;
+
+query
+CALL factorial(10)
+----
+3628800
+
+statement ok
+CREATE OR REPLACE PROCEDURE countdown(n INTEGER)
+RETURNS INTEGER
+LANGUAGE SQL
+AS
+DECLARE
+  r INTEGER;
+BEGIN
+  IF (n <= 0) THEN
+    RETURN 0;
+  END IF;
+  CALL countdown(:n - 1) INTO :r;
+  RETURN r + 1;
+END;
+
+query
+CALL countdown(49)
+----
+49
+
+error 100389
+CALL countdown(60)
+
+# Overloads are chosen by argument count, then by argument types.
+statement ok
+CREATE OR REPLACE PROCEDURE describe_value(v NUMBER)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+BEGIN
+  RETURN 'number ' || v;
+END;
+
+statement ok
+CREATE OR REPLACE PROCEDURE describe_value(v VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+BEGIN
+  RETURN 'text ' || v;
+END;
+
+statement ok
+CREATE OR REPLACE PROCEDURE describe_value(a NUMBER, b NUMBER)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+BEGIN
+  RETURN 'sum ' || (a + b);
+END;
+
+query
+CALL describe_value(5)
+----
+number 5
+
+query
+CALL describe_value('five')
+----
+text five
+
+query
+CALL describe_value(2, 3)
+----
+sum 5
+
+error 002002
+CREATE PROCEDURE describe_value(v VARCHAR(10))
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+BEGIN
+  RETURN v;
+END;
+
+query
+CREATE PROCEDURE IF NOT EXISTS describe_value(v VARCHAR(10))
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+BEGIN
+  RETURN v;
+END;
+----
+DESCRIBE_VALUE already exists, statement succeeded.
+
+statement ok
+SHOW PROCEDURES LIKE 'DESCRIBE%'
+
+query rowsort
+SELECT "name", "schema_name", "is_builtin", "is_aggregate", "is_ansi", "min_num_arguments", "max_num_arguments",
+  "arguments", "description", "catalog_name", "is_table_function", "valid_for_clustering", "is_secure"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+----
+DESCRIBE_VALUE|PUBLIC|N|N|N|1|1|DESCRIBE_VALUE(NUMBER) RETURN VARCHAR|user-defined procedure|CORPUS_26_PROCEDURES|N|N|N
+DESCRIBE_VALUE|PUBLIC|N|N|N|1|1|DESCRIBE_VALUE(VARCHAR) RETURN VARCHAR|user-defined procedure|CORPUS_26_PROCEDURES|N|N|N
+DESCRIBE_VALUE|PUBLIC|N|N|N|2|2|DESCRIBE_VALUE(NUMBER, NUMBER) RETURN VARCHAR|user-defined procedure|CORPUS_26_PROCEDURES|N|N|N
+
+query
+DROP PROCEDURE describe_value(NUMBER, NUMBER)
+----
+DESCRIBE_VALUE successfully dropped.
+
+error 002003
+DROP PROCEDURE describe_value(NUMBER, NUMBER)
+
+query
+DROP PROCEDURE IF EXISTS describe_value(NUMBER, NUMBER)
+----
+Drop statement executed successfully (DESCRIBE_VALUE already dropped).
+
+statement ok
+SHOW PROCEDURES LIKE '%_PROC' IN SCHEMA public
+
+query rowsort
+SELECT "name", "min_num_arguments", "max_num_arguments", "arguments", "is_table_function"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+----
+BUILD_STRING_PROC|1|3|BUILD_STRING_PROC(VARCHAR [, VARCHAR, VARCHAR]) RETURN VARCHAR|N
+
+statement ok
+SHOW PROCEDURES LIKE 'FIND_INVOICE_BY_ID'
+
+query
+SELECT "arguments", "is_table_function" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+----
+FIND_INVOICE_BY_ID(VARCHAR) RETURN TABLE (ID INTEGER, PRICE NUMBER(12,2))|Y
+
+statement ok
+CREATE OR REPLACE PROCEDURE one_liner(message VARCHAR) RETURNS VARCHAR LANGUAGE SQL EXECUTE AS CALLER AS 'BEGIN RETURN message; END'
+
+query
+DESCRIBE PROCEDURE one_liner(VARCHAR)
+----
+signature|(MESSAGE VARCHAR)
+returns|VARCHAR
+language|SQL
+null handling|CALLED ON NULL INPUT
+volatility|VOLATILE
+execute as|CALLER
+body|BEGIN RETURN message; END
+
+query
+CALL one_liner('quoted body')
+----
+quoted body
+
+error 002003
+DESCRIBE PROCEDURE one_liner(NUMBER)
+
+query
+SELECT procedure_name, argument_signature, data_type, procedure_language
+FROM information_schema.procedures WHERE procedure_name LIKE 'RETURN%'
+----
+RETURN_GREATER|(NUMBER_1 INTEGER, NUMBER_2 INTEGER)|INTEGER|SQL
+
+# The hidden schema that stores procedures isn't visible.
+query
+SELECT count(*) FROM information_schema.schemata WHERE schema_name ILIKE '%localflake%'
+----
+0
+
+query
+SELECT count(*) FROM information_schema.tables WHERE table_name = 'PROCEDURES'
+----
+0
+
+# RETURNS NULL ON NULL INPUT skips the body.
+statement ok
+CREATE OR REPLACE PROCEDURE strict_proc(x INTEGER)
+RETURNS VARCHAR
+LANGUAGE SQL
+STRICT
+AS
+BEGIN
+  RETURN 'ran';
+END;
+
+query
+CALL strict_proc(NULL)
+----
+NULL
+
+query
+CALL strict_proc(1)
+----
+ran
+
+# NOT NULL return types reject NULL.
+statement ok
+CREATE OR REPLACE PROCEDURE returns_null()
+RETURNS VARCHAR NOT NULL
+LANGUAGE SQL
+AS
+BEGIN
+  RETURN NULL;
+END;
+
+error 100072
+CALL returns_null()
+
+# An exception a procedure doesn't handle.
+statement ok
+CREATE OR REPLACE PROCEDURE raise_it()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+DECLARE
+  my_exception EXCEPTION (-20002, 'Raised MY_EXCEPTION.');
+BEGIN
+  RAISE my_exception;
+END;
+
+error Uncaught exception of type 'MY_EXCEPTION' on line 4 at position 2 : Raised MY_EXCEPTION.
+CALL raise_it()
+
+query
+DECLARE
+  result VARCHAR;
+BEGIN
+  CALL raise_it();
+  RETURN 'unreachable';
+EXCEPTION
+  WHEN STATEMENT_ERROR THEN RETURN SQLCODE;
+END
+----
+-20002
+
+# Procedures can be qualified, and live in their schema.
+statement ok
+CREATE SCHEMA other_schema
+
+statement ok
+CREATE PROCEDURE other_schema.where_am_i()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+BEGIN
+  RETURN 'other';
+END;
+
+query
+CALL corpus_26_procedures.other_schema.where_am_i()
+----
+other
+
+statement ok
+USE SCHEMA public
+
+error 002141
+CALL where_am_i()
+
+query
+CALL other_schema.where_am_i()
+----
+other
+
+# A schema's procedures go with it.
+statement ok
+DROP SCHEMA other_schema
+
+statement ok
+CREATE SCHEMA other_schema
+
+error 002141
+CALL other_schema.where_am_i()
+
+statement ok
+CREATE PROCEDURE other_schema.where_am_i() RETURNS VARCHAR LANGUAGE SQL AS 'BEGIN RETURN ''again''; END'
+
+query
+CALL other_schema.where_am_i()
+----
+again
+
+statement ok
+CREATE OR REPLACE SCHEMA other_schema
+
+error 002141
+CALL where_am_i()
+
+statement ok
+USE SCHEMA public
+
+error 002040
+CREATE PROCEDURE js_proc() RETURNS FLOAT LANGUAGE JAVASCRIPT AS 'return 1;'
+
+query
+CALL output_message(CURRENT_DATABASE())
+----
+CORPUS_26_PROCEDURES
+
+# Clones copy procedures.
+statement ok
+CREATE DATABASE corpus_26_clone CLONE corpus_26_procedures
+
+query
+CALL corpus_26_clone.public.output_message('from the clone')
+----
+from the clone
+
+statement ok
+SHOW SCHEMAS IN DATABASE corpus_26_clone
+
+query
+SELECT "name" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) ORDER BY 1
+----
+INFORMATION_SCHEMA
+OTHER_SCHEMA
+PUBLIC
+
+statement ok
+DROP DATABASE corpus_26_clone
+
+statement ok
+USE DATABASE corpus_26_procedures

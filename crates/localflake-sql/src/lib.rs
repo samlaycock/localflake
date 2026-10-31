@@ -18,6 +18,7 @@ mod information_schema;
 mod match_recognize;
 mod meta;
 mod normalize;
+pub mod procedure;
 mod rewrite;
 pub mod scripting;
 pub mod stage;

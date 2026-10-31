@@ -35,6 +35,7 @@ ecb = { version = "0.2", features = ["alloc"] }
 md5 = { package = "md-5", version = "0.11" }
 ofb = "0.7"
 sha2 = "0.11"
+stacker = "0.1"
 quick-xml = "0.42"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

@@ -12,6 +12,7 @@ mod files;
 mod functions;
 mod match_recognize;
 mod probe;
+mod procedures;
 mod script;
 mod search;
 mod sketch;
@@ -694,6 +695,14 @@ impl Session {
         match self.translate_bound(sql, bindings.first().map(Vec::as_slice).unwrap_or_default())? {
             Command::Stage(command) => self.run_stage_command(command, query_id),
             Command::Script(stmt) => self.run_script(stmt, query_id),
+            Command::CreateProcedure { procedure, definition } => {
+                self.create_procedure(procedure, &definition, query_id)
+            }
+            Command::Call(call) => self.run_call(&call, query_id),
+            Command::DropProcedure { overload, if_exists } => {
+                self.drop_procedure(&overload.name, &overload.types, if_exists, query_id)
+            }
+            Command::DescribeProcedure(overload) => self.describe_procedure(&overload.name, &overload.types, query_id),
             Command::Use(target) => {
                 self.apply_use(target)?;
                 ok()
@@ -724,9 +733,12 @@ impl Session {
                 self.drop_database(&name)?;
                 Ok(QueryResult::status(id(), &format!("{name} successfully dropped."), StatementKind::Ddl))
             }
-            Command::CreateSchema { sql, database, schema } => {
+            Command::CreateSchema { sql, database, schema, or_replace } => {
                 let database =
                     database.or_else(|| self.ctx.database.clone()).ok_or_else(EngineError::no_current_database)?;
+                if or_replace {
+                    self.drop_schema_procedures(&database, &schema)?;
+                }
                 self.conn.execute_batch(&sql)?;
                 self.use_database(&database, Some(&schema))?;
                 Ok(QueryResult::status(id(), &format!("Schema {schema} successfully created."), StatementKind::Ddl))
@@ -827,6 +839,13 @@ impl Session {
                 let pairs: Vec<_> = labels.iter().map(String::as_str).zip(counts).collect();
                 Ok(QueryResult::row_counts(id(), &pairs, StatementKind::Insert))
             }
+            Command::DropSchema { command, database, schema } => {
+                let result = self.run_sql(&command, bindings, describe_only, query_id)?;
+                let database =
+                    database.or_else(|| self.ctx.database.clone()).ok_or_else(EngineError::no_current_database)?;
+                self.drop_schema_procedures(&database, &schema)?;
+                Ok(result)
+            }
             Command::Sql(command) => self.run_sql(&command, bindings, describe_only, query_id),
         }
     }
@@ -839,6 +858,13 @@ impl Session {
         query_id: &str,
     ) -> Result<QueryResult, EngineError> {
         tracing::debug!(sql = %command.sql, kind = ?command.kind, "duckdb");
+        let expanded;
+        let command = if command.sql.contains("__lf_procedures") {
+            expanded = SqlCommand { sql: self.expand_procedures(&command.sql)?, ..command.clone() };
+            &expanded
+        } else {
+            command
+        };
         for query_id in &command.result_scans {
             self.materialize_result(query_id)?;
         }

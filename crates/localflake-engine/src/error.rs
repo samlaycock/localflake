@@ -109,6 +109,22 @@ impl EngineError {
         Self::compilation("001003", "42000", format!("a RESULTSET needs a query, not '{text}'"))
     }
 
+    pub(crate) fn unknown_procedure(name: &str) -> Self {
+        Self::compilation("002141", "42601", format!("Unknown user-defined function {name}"))
+    }
+
+    pub(crate) fn procedure_arguments(name: &str) -> Self {
+        Self::compilation("001044", "42P13", format!("Invalid argument types for function '{name}'"))
+    }
+
+    pub(crate) fn null_result() -> Self {
+        Self::new("100072", "22000", "NULL result in a non-nullable column")
+    }
+
+    pub(crate) fn call_depth() -> Self {
+        Self::new("100389", "54001", "Exceeded the maximum depth of nested procedure calls")
+    }
+
     pub(crate) fn execute_immediate_null() -> Self {
         Self::new("100039", "22004", "EXECUTE IMMEDIATE statement is NULL")
     }

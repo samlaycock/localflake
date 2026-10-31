@@ -11,9 +11,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta};
 use localflake_sql::StatementKind;
+use localflake_sql::procedure::{self, Call, Returns};
 use localflake_sql::scripting::{Block, CursorSource, Declaration, Handler, Statement, Stmt};
 
+use crate::procedures::{Stored, column_alias};
 use crate::{Column, EngineError, QueryResult, Session, SfType, new_query_id};
+
+/// How deeply procedures may call procedures.
+const MAX_CALL_DEPTH: usize = 50;
 
 /// A variable's value: a SQL literal and its Snowflake type.
 #[derive(Debug, Clone)]
@@ -114,15 +119,15 @@ struct Interpreter<'s> {
     /// Where the statement being run starts.
     line: u64,
     position: u64,
+    /// How many procedure calls deep this is.
+    depth: usize,
 }
 
 impl Session {
     /// Runs a Snowflake Scripting statement. A block returns one row in a
     /// column named `anonymous block`; `EXECUTE IMMEDIATE` returns its statement's result.
     pub(crate) fn run_script(&mut self, stmt: Stmt, query_id: &str) -> Result<QueryResult, EngineError> {
-        let mut interpreter =
-            Interpreter { session: self, scopes: vec![Scope::default()], handlers: vec![], line: 1, position: 0 };
-        interpreter.reset_status();
+        let mut interpreter = Interpreter::new(self);
         let outcome = interpreter.top_level(&stmt);
         let value = match outcome {
             Ok(Outcome::Result(mut result)) => {
@@ -135,6 +140,27 @@ impl Session {
         };
         let sql = format!("SELECT {} AS \"anonymous block\"", value.literal);
         self.run_translated(&sql, query_id, &[], false)
+    }
+}
+
+impl Session {
+    /// Runs `CALL`. A scalar result is one row in a column named after the procedure.
+    pub(crate) fn run_call(&mut self, call: &Call, query_id: &str) -> Result<QueryResult, EngineError> {
+        let mut interpreter = Interpreter::new(self);
+        let outcome = interpreter.call(call);
+        match outcome {
+            Ok((Outcome::Result(mut result), _)) => {
+                result.query_id = query_id.to_owned();
+                Ok(result)
+            }
+            Ok((Outcome::Value(value), name)) => {
+                let value = value.unwrap_or_else(|| Value::null("VARCHAR"));
+                let sql = format!("SELECT {} AS {}", value.literal, column_alias(&name));
+                self.run_translated(&sql, query_id, &[], false)
+            }
+            Err(Failure::Fatal(err)) => Err(err),
+            Err(Failure::Raised(raised)) => Err(raised.cause.clone().unwrap_or_else(|| uncaught(&raised))),
+        }
     }
 }
 
@@ -160,6 +186,13 @@ fn error_code(code: i64) -> &'static str {
 }
 
 impl<'s> Interpreter<'s> {
+    fn new(session: &'s mut Session) -> Self {
+        let mut interpreter =
+            Interpreter { session, scopes: vec![Scope::default()], handlers: vec![], line: 1, position: 0, depth: 0 };
+        interpreter.reset_status();
+        interpreter
+    }
+
     fn top_level(&mut self, stmt: &Stmt) -> Run<Outcome> {
         match stmt {
             Stmt::Block(block) => match self.block(block)? {
@@ -699,6 +732,11 @@ impl<'s> Interpreter<'s> {
 
     /// A SQL statement with `:variable` references, and `SELECT ... INTO :a, :b`.
     fn sql_statement(&mut self, sql: &str) -> Run<QueryResult> {
+        if sql.trim_start().get(..4).is_some_and(|w| w.eq_ignore_ascii_case("CALL"))
+            && let Some(call) = procedure::parse_call(sql).map_err(|e| self.statement_error(e.into()))?
+        {
+            return self.call_statement(&call);
+        }
         let into = localflake_sql::scripting::select_into(sql).map_err(|e| self.statement_error(e.into()))?;
         let (sql, targets) = match into {
             Some((sql, targets)) => (sql, targets),
@@ -724,6 +762,140 @@ impl<'s> Interpreter<'s> {
             }
         }
         Ok(result)
+    }
+
+    /// `CALL` in a block: a query of its own, whose value `INTO :var` assigns.
+    fn call_statement(&mut self, call: &Call) -> Run<QueryResult> {
+        let (outcome, name) = self.call(call)?;
+        let result = match outcome {
+            Outcome::Result(mut result) => {
+                let query_id = new_query_id();
+                result.query_id = query_id.clone();
+                self.session.engine.store(&query_id, Ok(Arc::new(result.clone())));
+                self.session.ctx.query_history.push(query_id);
+                result
+            }
+            Outcome::Value(value) => {
+                let value = value.unwrap_or_else(|| Value::null("VARCHAR"));
+                if let Some(into) = &call.into {
+                    self.assign_converted(into, value.clone())?;
+                }
+                let sql = format!("SELECT {} AS {}", value.literal, column_alias(&name));
+                self.run_sql(&sql).map_err(|e| self.statement_error(e))?
+            }
+        };
+        self.set_dml_status(None, Some(result.row_count() as i64));
+        Ok(result)
+    }
+
+    /// Runs a stored procedure with its arguments as its only variables. Returns
+    /// its value (converted to its return type) or table, and its name.
+    fn call(&mut self, call: &Call) -> Run<(Outcome, String)> {
+        self.check_cancelled()?;
+        if self.depth >= MAX_CALL_DEPTH {
+            return Err(self.statement_error(EngineError::call_depth()));
+        }
+        let overloads = self.session.procedure_overloads(&call.name).map_err(|e| self.statement_error(e))?;
+        let mut values = Vec::new();
+        for (name, expr) in &call.arguments {
+            values.push((name.clone(), self.evaluate(expr, None)?));
+        }
+        let Some((stored, bound)) = choose_overload(overloads, &values) else {
+            let name = localflake_sql::decode_identifier(call.name.last().map_or("", String::as_str));
+            return Err(self.statement_error(EngineError::procedure_arguments(&name)));
+        };
+        let procedure = &stored.procedure;
+        let mut arguments = Vec::new();
+        for (argument, slot) in procedure.arguments.iter().zip(&bound) {
+            let value = match (slot, &argument.default) {
+                (Some(i), _) => values[*i].1.clone(),
+                (None, Some(default)) => self.evaluate(default, None)?,
+                (None, None) => Value::null(&argument.data_type),
+            };
+            arguments.push(self.evaluate(&value.literal, Some(&argument.data_type))?);
+        }
+        let return_type = match &procedure.returns {
+            Returns::Scalar { data_type, .. } => data_type.as_str(),
+            Returns::Table(_) => "VARCHAR",
+        };
+        if procedure.null_input == "RETURNS NULL ON NULL INPUT"
+            && arguments.iter().any(|v| v.literal.starts_with("NULL"))
+        {
+            return Ok((Outcome::Value(Some(Value::null(return_type))), stored.name));
+        }
+        let body = match procedure.body_normalized {
+            true => procedure.body.clone(),
+            false => {
+                localflake_sql::normalize_identifiers(&procedure.body).map_err(|e| self.statement_error(e.into()))?
+            }
+        };
+        if !localflake_sql::scripting::is_script(&body) {
+            let err =
+                localflake_sql::SqlError::Unsupported("procedure bodies that aren't Snowflake Scripting blocks".into());
+            return Err(self.statement_error(err.into()));
+        }
+        let parsed = localflake_sql::scripting::parse(&body).map_err(|e| self.statement_error(e.into()))?;
+
+        let saved = std::mem::replace(&mut self.scopes, vec![Scope::default()]);
+        let saved_handlers = std::mem::take(&mut self.handlers);
+        let (line, position) = (self.line, self.position);
+        self.depth += 1;
+        self.reset_status();
+        for (argument, value) in procedure.arguments.iter().zip(arguments) {
+            self.declare(&argument.name, Some(argument.data_type.clone()), value);
+        }
+        // Each nested call takes a few hundred KB of stack in debug builds.
+        let outcome = stacker::maybe_grow(512 * 1024, 4 * 1024 * 1024, || self.top_level(&parsed));
+        // OUT arguments pass their final values back to the caller's variables.
+        let outs: Vec<(String, Value)> = procedure
+            .arguments
+            .iter()
+            .zip(&bound)
+            .filter(|(argument, _)| argument.out)
+            .filter_map(|(argument, slot)| {
+                let target = call.arguments[(*slot)?].1.trim().trim_start_matches(':').trim();
+                let target = match target.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+                    Some(quoted) => quoted.to_owned(),
+                    None => target.to_uppercase(),
+                };
+                Some((target, self.lookup(&argument.name)?.value.clone()))
+            })
+            .collect();
+        self.scopes = saved;
+        self.handlers = saved_handlers;
+        (self.line, self.position) = (line, position);
+        self.depth -= 1;
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(Failure::Raised(raised)) => return Err(self.statement_error(uncaught(&raised))),
+            Err(fatal) => return Err(fatal),
+        };
+        for (target, value) in outs {
+            if self.lookup(&target).is_some() {
+                self.assign_converted(&target, value)?;
+            }
+        }
+        let outcome = match (outcome, &procedure.returns) {
+            (Outcome::Value(value), Returns::Scalar { data_type, not_null }) => {
+                let value = match value {
+                    Some(value) => self.evaluate(&value.literal, Some(data_type))?,
+                    None => Value::null(data_type),
+                };
+                if *not_null && value.literal.starts_with("NULL") {
+                    return Err(self.statement_error(EngineError::null_result()));
+                }
+                Outcome::Value(Some(value))
+            }
+            (Outcome::Result(mut result), Returns::Table(columns)) => {
+                for (column, (name, _)) in result.columns.iter_mut().zip(columns) {
+                    column.name = localflake_sql::decode_identifier(name);
+                }
+                Outcome::Result(result)
+            }
+            (outcome, _) => outcome,
+        };
+        Ok((outcome, stored.name))
     }
 
     /// `EXECUTE IMMEDIATE <expr> [USING (...)]`: runs the text as a statement or block.
@@ -775,6 +947,44 @@ fn loop_flow(flow: Flow, label: &Option<String>) -> LoopFlow {
         Flow::Break(l) if ours(&l) => LoopFlow::Stop,
         other => LoopFlow::Exit(other),
     }
+}
+
+/// The overload a CALL's arguments fit, preferring the one whose argument types
+/// match the values' best, and which argument (if any) each parameter takes.
+/// Arguments are all positional or all named (`name => value`).
+fn choose_overload(overloads: Vec<Stored>, values: &[(Option<String>, Value)]) -> Option<(Stored, Vec<Option<usize>>)> {
+    let named = values.iter().any(|(name, _)| name.is_some());
+    let mut best: Option<(usize, Stored, Vec<Option<usize>>)> = None;
+    for stored in overloads {
+        let parameters = &stored.procedure.arguments;
+        let bound: Vec<Option<usize>> = if named {
+            if values.iter().any(|(name, _)| name.as_ref().is_none_or(|n| !parameters.iter().any(|p| &p.name == n))) {
+                continue;
+            }
+            parameters.iter().map(|p| values.iter().position(|(name, _)| name.as_ref() == Some(&p.name))).collect()
+        } else {
+            if values.len() > parameters.len() {
+                continue;
+            }
+            (0..parameters.len()).map(|i| (i < values.len()).then_some(i)).collect()
+        };
+        if parameters.iter().zip(&bound).any(|(p, slot)| slot.is_none() && p.default.is_none()) {
+            continue;
+        }
+        let score = parameters
+            .iter()
+            .zip(&bound)
+            .filter(|(p, slot)| {
+                slot.is_some_and(|i| {
+                    procedure::type_family(&p.data_type) == procedure::type_family(&values[i].1.data_type)
+                })
+            })
+            .count();
+        if best.as_ref().is_none_or(|(s, _, _)| score > *s) {
+            best = Some((score, stored, bound));
+        }
+    }
+    best.map(|(_, stored, bound)| (stored, bound))
 }
 
 fn find_handler<'h>(handlers: &'h [Handler], raised: &Raised) -> Option<&'h Handler> {

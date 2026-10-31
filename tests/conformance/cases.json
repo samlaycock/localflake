@@ -1926,6 +1926,86 @@
           }
         }
       ]
+    },
+    {
+      "name": "scripting/stored-procedures",
+      "steps": [
+        {
+          "sql": "create or replace procedure conf_greet(name varchar, punctuation varchar default '!')\nreturns varchar\nlanguage sql\nas\n$$\nbegin\n  return 'Hello, ' || name || punctuation;\nend;\n$$",
+          "rows": [
+            [
+              "Function CONF_GREET successfully created."
+            ]
+          ]
+        },
+        {
+          "sql": "call conf_greet('world')",
+          "columns": [
+            [
+              "CONF_GREET",
+              "TEXT"
+            ]
+          ],
+          "rows": [
+            [
+              "Hello, world!"
+            ]
+          ]
+        },
+        {
+          "sql": "call conf_greet(punctuation => '?', name => 'you')",
+          "rows": [
+            [
+              "Hello, you?"
+            ]
+          ]
+        },
+        {
+          "sql": "create or replace procedure conf_numbers(n integer)\nreturns table (num integer)\nlanguage sql\nas\n$$\ndeclare\n  res resultset default (select column1 as num from values (1), (2), (3) where column1 <= :n order by 1);\nbegin\n  return table(res);\nend;\n$$"
+        },
+        {
+          "sql": "call conf_numbers(2)",
+          "columns": [
+            [
+              "NUM",
+              "FIXED(*,0)"
+            ]
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        },
+        {
+          "sql": "create or replace procedure conf_fail()\nreturns varchar\nlanguage sql\nas\n$$\ndeclare\n  e exception (-20004, 'Procedure failed.');\nbegin\n  raise e;\nend;\n$$"
+        },
+        {
+          "sql": "call conf_fail()",
+          "error": {
+            "code": "-20004",
+            "sqlstate": "P0001"
+          }
+        },
+        {
+          "sql": "drop procedure conf_greet(varchar, varchar)",
+          "rows": [
+            [
+              "CONF_GREET successfully dropped."
+            ]
+          ]
+        },
+        {
+          "sql": "call conf_greet('world')",
+          "error": {
+            "code": "002141",
+            "sqlstate": "42601"
+          }
+        }
+      ]
     }
   ]
 }

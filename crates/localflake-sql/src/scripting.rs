@@ -169,7 +169,7 @@ fn is_transaction_begin(next: Option<&str>) -> bool {
     matches!(next, None | Some("" | "TRANSACTION" | "WORK" | "NAME"))
 }
 
-fn word_of(token: &Token) -> Option<String> {
+pub(crate) fn word_of(token: &Token) -> Option<String> {
     match token {
         Token::Word(w) if w.quote_style.is_none() => Some(w.value.to_uppercase()),
         _ => None,
@@ -722,7 +722,7 @@ const BEFORE_EXPRESSION: &[&str] = &[
     "LOOP",
 ];
 
-fn tokens_with_offsets(sql: &str) -> Result<Vec<(Token, usize, usize)>, SqlError> {
+pub(crate) fn tokens_with_offsets(sql: &str) -> Result<Vec<(Token, usize, usize)>, SqlError> {
     let offsets = LineOffsets::new(sql);
     Ok(Tokenizer::new(&SnowflakeDialect, sql)
         .with_unescape(false)
@@ -839,13 +839,16 @@ pub fn select_into(sql: &str) -> Result<Option<(String, Vec<String>)>, SqlError>
             Token::LParen => depth += 1,
             Token::RParen => depth -= 1,
             _ if depth == 0 && word_of(token).as_deref() == Some("INTO") => {
+                // `INTO :a, :b`, or without the colons.
                 let mut names = Vec::new();
                 let mut j = i + 1;
-                while let (Some(Token::Colon), Some(Token::Word(w))) =
-                    (tokens.get(j).map(|t| &t.0), tokens.get(j + 1).map(|t| &t.0))
-                {
+                loop {
+                    if matches!(tokens.get(j).map(|t| &t.0), Some(Token::Colon)) {
+                        j += 1;
+                    }
+                    let Some(Token::Word(w)) = tokens.get(j).map(|t| &t.0) else { break };
                     names.push(variable_name(w));
-                    j += 2;
+                    j += 1;
                     if !matches!(tokens.get(j).map(|t| &t.0), Some(Token::Comma)) {
                         break;
                     }
@@ -891,11 +894,14 @@ pub(crate) struct BlockTracker {
     depth: i32,
     cases: i32,
     at_start: bool,
+    /// The statement is `CREATE ... PROCEDURE`, whose body may be a bare block after AS.
+    creating: bool,
+    procedure: bool,
 }
 
 impl BlockTracker {
     pub(crate) fn new() -> Self {
-        Self { in_block: false, depth: 0, cases: 0, at_start: true }
+        Self { in_block: false, depth: 0, cases: 0, at_start: true, creating: false, procedure: false }
     }
 
     /// Feeds the next non-whitespace token (with the word after it, if any).
@@ -905,6 +911,13 @@ impl BlockTracker {
         let next_word = next.and_then(word_of);
         let starting = std::mem::take(&mut self.at_start);
         match word.as_deref() {
+            Some("CREATE") if starting => self.creating = true,
+            Some("PROCEDURE") if self.creating => self.procedure = true,
+            Some("AS")
+                if self.procedure && !self.in_block && matches!(next_word.as_deref(), Some("DECLARE" | "BEGIN")) =>
+            {
+                self.in_block = true;
+            }
             Some("DECLARE") if starting => self.in_block = true,
             Some("BEGIN")
                 if (starting || self.in_block)
@@ -1051,5 +1064,11 @@ mod split_tests {
             &split[2..6],
             ["BEGIN", "COMMIT", "BEGIN TRANSACTION", "EXECUTE IMMEDIATE $$ begin return 1; end; $$"]
         );
+        let procedures = crate::split(
+            "create procedure p() returns int as declare x int; begin x := 1; return x; end; \
+             create procedure q() returns int execute as caller as begin return 2; end; call p()",
+        )
+        .unwrap();
+        assert_eq!(procedures.len(), 3, "{procedures:?}");
     }
 }
