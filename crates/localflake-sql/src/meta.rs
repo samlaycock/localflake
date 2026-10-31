@@ -545,6 +545,29 @@ pub fn show_sql(show: &Show, ctx: &Context) -> Result<String, SqlError> {
             ]),
             "FUNCTION",
         ),
+        // `__lf_procedures` is replaced by the stored procedures of every database (see the engine's `procedures`).
+        "PROCEDURES" | "USER PROCEDURES" => (
+            "SELECT * FROM __lf_procedures".to_owned(),
+            cols(&[
+                "created_on",
+                "name",
+                "schema_name",
+                "'N' AS is_builtin",
+                "'N' AS is_aggregate",
+                "'N' AS is_ansi",
+                "min_num_arguments",
+                "max_num_arguments",
+                "arguments",
+                "coalesce(comment, 'user-defined procedure') AS description",
+                "database_name AS catalog_name",
+                "CASE WHEN starts_with(returns, 'TABLE') THEN 'Y' ELSE 'N' END AS is_table_function",
+                "'N' AS valid_for_clustering",
+                "CASE WHEN is_secure THEN 'Y' ELSE 'N' END AS is_secure",
+                "'' AS secrets",
+                "'' AS external_access_integrations",
+            ]),
+            "PROCEDURE",
+        ),
         _ => return Ok(empty(&["created_on", "name", "database_name", "schema_name", "kind", "comment", "owner"])),
     };
 

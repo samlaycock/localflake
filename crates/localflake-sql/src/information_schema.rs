@@ -81,8 +81,9 @@ CREATE OR REPLACE TEMP MACRO sf_type_json(t, p, s, nullable) AS
         ELSE '{"type":"' || sf_data_type(t) || '","nullable":' || nullable || '}' END;
 "#;
 
-/// Schemas DuckDB creates in every catalog that Snowflake doesn't have.
-pub const HIDDEN_SCHEMAS: &str = "('main', 'pg_catalog', 'information_schema')";
+/// Schemas DuckDB creates in every catalog that Snowflake doesn't have, and
+/// `__localflake`, which holds localflake's own metadata (stored procedures).
+pub const HIDDEN_SCHEMAS: &str = "('main', 'pg_catalog', 'information_schema', '__localflake')";
 
 pub fn view(database: &str, view: &str) -> Option<String> {
     let db = quote_literal(database);
@@ -165,6 +166,19 @@ pub fn view(database: &str, view: &str) -> Option<String> {
              CASE WHEN cycle THEN 'YES' ELSE 'NO' END AS CYCLE_OPTION, current_timestamp AS CREATED, \
              current_timestamp AS LAST_ALTERED, 'NO' AS ORDERED, comment AS COMMENT \
              FROM sf_sequences() WHERE database_name = {db} AND schema_name NOT IN {hidden}"
+        ),
+        // `__lf_procedures` is replaced by the stored procedures of every database (see the engine's `procedures`).
+        "PROCEDURES" => format!(
+            "SELECT database_name AS PROCEDURE_CATALOG, schema_name AS PROCEDURE_SCHEMA, name AS PROCEDURE_NAME, \
+             'ACCOUNTADMIN' AS PROCEDURE_OWNER, argument_signature AS ARGUMENT_SIGNATURE, returns AS DATA_TYPE, \
+             CAST(NULL AS BIGINT) AS CHARACTER_MAXIMUM_LENGTH, CAST(NULL AS BIGINT) AS CHARACTER_OCTET_LENGTH, \
+             CAST(NULL AS BIGINT) AS NUMERIC_PRECISION, CAST(NULL AS BIGINT) AS NUMERIC_PRECISION_RADIX, \
+             CAST(NULL AS BIGINT) AS NUMERIC_SCALE, language AS PROCEDURE_LANGUAGE, body AS PROCEDURE_DEFINITION, \
+             created_on AS CREATED, created_on AS LAST_ALTERED, comment AS COMMENT, \
+             CAST(NULL AS VARCHAR) AS EXTERNAL_ACCESS_INTEGRATIONS, CAST(NULL AS VARCHAR) AS SECRETS, \
+             CAST(NULL AS VARCHAR) AS RUNTIME_VERSION, CAST(NULL AS VARCHAR) AS PACKAGES, \
+             CAST(NULL AS VARCHAR) AS INSTALLED_PACKAGES, CAST(NULL AS VARCHAR) AS ARTIFACT_REPOSITORY, \
+             'ROLE' AS OWNER_ROLE_TYPE FROM __lf_procedures WHERE database_name = {db}"
         ),
         _ => return None,
     })

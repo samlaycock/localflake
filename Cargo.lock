@@ -1196,6 +1196,7 @@ dependencies = [
  "regex",
  "serde_json",
  "sha2",
+ "stacker",
  "thiserror",
  "tracing",
  "uuid",

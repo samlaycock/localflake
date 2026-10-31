@@ -30,6 +30,14 @@ pub enum Command {
         sql: String,
         database: Option<String>,
         schema: String,
+        /// `OR REPLACE`: the old schema's stored procedures go too.
+        or_replace: bool,
+    },
+    /// `DROP SCHEMA`: the engine also drops the schema's stored procedures.
+    DropSchema {
+        command: SqlCommand,
+        database: Option<String>,
+        schema: String,
     },
     AlterSession {
         set: Vec<(String, String)>,
@@ -65,6 +73,20 @@ pub enum Command {
     },
     /// A Snowflake Scripting block or `EXECUTE IMMEDIATE`, run by the engine's interpreter.
     Script(crate::scripting::Stmt),
+    /// `CREATE PROCEDURE`; `definition` is the statement, which the engine stores.
+    CreateProcedure {
+        procedure: crate::procedure::Procedure,
+        definition: String,
+    },
+    /// `CALL name(args)`.
+    Call(crate::procedure::Call),
+    /// `DROP PROCEDURE name(types)`.
+    DropProcedure {
+        overload: crate::procedure::Overload,
+        if_exists: bool,
+    },
+    /// `DESCRIBE PROCEDURE name(types)`.
+    DescribeProcedure(crate::procedure::Overload),
     /// `ALTER VIEW ... SET | UNSET COMMENT`: the engine replaces the view's
     /// comment, keeping its kind marker (see `views`).
     CommentOnView {
@@ -243,6 +265,9 @@ pub fn translate_statement(sql: &str, ctx: &Context) -> Result<Command, SqlError
     if crate::scripting::is_script(sql) {
         return Ok(Command::Script(crate::scripting::parse(sql)?));
     }
+    if let Some(command) = procedure_command(sql)? {
+        return Ok(command);
+    }
     if let Some(command) = crate::stage::parse(sql)? {
         return Ok(Command::Stage(command));
     }
@@ -372,7 +397,9 @@ fn translate_parsed(statement: Statement, ctx: &Context) -> Result<Command, SqlE
         Statement::Drop { object_type: ObjectType::Schema, names, if_exists, .. } => {
             let sql = format!("DROP SCHEMA {}{} CASCADE", if *if_exists { "IF EXISTS " } else { "" }, names[0]);
             let status = format!("{} successfully dropped.", last_part(&names[0]));
-            return Ok(Command::Sql(SqlCommand::new(sql, StatementKind::Ddl).with_status(status)));
+            let (database, schema) = schema_parts(&names[0].to_string());
+            let command = SqlCommand::new(sql, StatementKind::Ddl).with_status(status);
+            return Ok(Command::DropSchema { command, database, schema });
         }
         Statement::Drop { object_type: ObjectType::MaterializedView, names, if_exists, .. } => {
             let sql = format!("DROP VIEW {}{}", if *if_exists { "IF EXISTS " } else { "" }, names[0]);
@@ -385,16 +412,12 @@ fn translate_parsed(statement: Statement, ctx: &Context) -> Result<Command, SqlE
         }
         Statement::CreateSchema { schema_name, if_not_exists, or_replace, .. } => {
             let name = schema_name.to_string();
-            let parts: Vec<String> = name.split('.').map(|p| p.trim_matches('"').to_owned()).collect();
-            let (database, schema) = match parts.as_slice() {
-                [db, schema] => (Some(db.clone()), schema.clone()),
-                _ => (None, parts.last().cloned().unwrap_or_default()),
-            };
+            let (database, schema) = schema_parts(&name);
             let mut sql = format!("CREATE SCHEMA {}{name}", if *if_not_exists { "IF NOT EXISTS " } else { "" });
             if *or_replace {
                 sql = format!("DROP SCHEMA IF EXISTS {name} CASCADE; {sql}");
             }
-            return Ok(Command::CreateSchema { sql, database, schema });
+            return Ok(Command::CreateSchema { sql, database, schema, or_replace: *or_replace });
         }
         Statement::CreateTable(_) => return render_create_table(statement, ctx).map(Command::Sql),
         Statement::CreateView(_) => return render_create_view(statement).map(Command::Sql),
@@ -568,6 +591,33 @@ fn preprocess_tokens(sql: &str) -> Result<String, SqlError> {
         i += 1;
     }
     Ok(if changed { tokens.iter().map(ToString::to_string).collect() } else { sql.to_owned() })
+}
+
+/// `[db.]schema` as its database (if given) and schema.
+fn schema_parts(name: &str) -> (Option<String>, String) {
+    let parts: Vec<String> = name.split('.').map(|p| p.trim_matches('"').to_owned()).collect();
+    match parts.as_slice() {
+        [db, schema] => (Some(db.clone()), schema.clone()),
+        _ => (None, parts.last().cloned().unwrap_or_default()),
+    }
+}
+
+/// `CREATE | CALL | DROP | DESCRIBE PROCEDURE`.
+fn procedure_command(sql: &str) -> Result<Option<Command>, SqlError> {
+    use crate::procedure;
+    if let Some(procedure) = procedure::parse_create(sql)? {
+        return Ok(Some(Command::CreateProcedure { procedure, definition: sql.to_owned() }));
+    }
+    if let Some(call) = procedure::parse_call(sql)? {
+        return Ok(Some(Command::Call(call)));
+    }
+    if let Some((overload, if_exists)) = procedure::parse_drop(sql)? {
+        return Ok(Some(Command::DropProcedure { overload, if_exists }));
+    }
+    if let Some(overload) = procedure::parse_describe(sql)? {
+        return Ok(Some(Command::DescribeProcedure(overload)));
+    }
+    Ok(None)
 }
 
 /// `DROP FUNCTION [IF EXISTS] name(arg types)`.
