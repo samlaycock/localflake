@@ -26,6 +26,11 @@ select '1'::boolean, 'yes'::boolean, 'off'::boolean, to_boolean('T'), to_boolean
 true|true|false|true|false|NULL|true
 
 query
+select try_cast('true' as boolean), try_cast('off' as boolean), try_cast('maybe' as boolean), try_cast(parse_json('true') as boolean), try_cast(0 as boolean)
+----
+true|false|NULL|true|false
+
+query
 select try_cast('x' as int), try_cast('12' as int), try_cast('2024-02-30' as date), cast('2024-03-15' as date), '42'::varchar::int + 1
 ----
 NULL|12|NULL|2024-03-15|43
