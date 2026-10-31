@@ -1,5 +1,6 @@
 mod protocol;
 mod routes;
+mod ui;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -28,6 +29,11 @@ struct Args {
     /// Snowflake does.
     #[arg(long, env = "LOCALFLAKE_MISSING_DATABASE", default_value = "create", value_parser = ["create", "ignore"])]
     missing_database: String,
+
+    /// Serve the web UI (a SQL worksheet, object explorer and query history)
+    /// at `/__localflake/ui/`.
+    #[arg(long, env = "LOCALFLAKE_UI", default_value_t = true, action = clap::ArgAction::Set)]
+    ui: bool,
 }
 
 #[tokio::main]
@@ -43,14 +49,18 @@ async fn main() -> anyhow::Result<()> {
     let engine = Engine::open(args.data_dir.as_deref())?;
     engine.set_create_missing_databases(args.missing_database == "create");
     let listener = tokio::net::TcpListener::bind(args.addr).await?;
-    tracing::info!(addr = %listener.local_addr()?, data_dir = ?args.data_dir, "localflake listening");
+    let addr = listener.local_addr()?;
+    tracing::info!(%addr, data_dir = ?args.data_dir, "localflake listening");
+    if args.ui {
+        tracing::info!("web UI at http://{addr}/__localflake/ui/");
+    }
 
     let forced_format = match args.result_format.as_str() {
         "json" => Some(protocol::ResultFormat::Json),
         "arrow" => Some(protocol::ResultFormat::Arrow),
         _ => None,
     };
-    axum::serve(listener, routes::router(engine, forced_format))
+    axum::serve(listener, routes::router(engine, forced_format, args.ui))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

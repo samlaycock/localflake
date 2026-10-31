@@ -209,18 +209,21 @@ impl StatementKind {
 
 /// Splits Snowflake SQL text into statements, normalizing identifier case.
 pub fn split(sql: &str) -> Result<Vec<String>, SqlError> {
-    split_text(&normalize_identifiers(sql)?)
+    let normalized = normalize_identifiers(sql)?;
+    Ok(statement_ranges(&normalized)?.into_iter().map(|range| normalized[range].to_owned()).collect())
 }
 
 /// Splits Snowflake SQL text into statements as written, for `CURRENT_STATEMENT()`.
 /// Normalizing doesn't add or remove statements, so these line up with [`split`].
 pub fn split_original(sql: &str) -> Result<Vec<String>, SqlError> {
-    split_text(sql)
+    Ok(statement_ranges(sql)?.into_iter().map(|range| sql[range].to_owned()).collect())
 }
 
-fn split_text(normalized: &str) -> Result<Vec<String>, SqlError> {
-    let tokens = Tokenizer::new(&SnowflakeDialect, normalized).tokenize_with_location()?;
-    let offsets = crate::normalize::LineOffsets::new(normalized);
+/// The byte range of each statement in `sql`, without surrounding whitespace
+/// or the terminating semicolon (for editors running the statement at the cursor).
+pub fn statement_ranges(sql: &str) -> Result<Vec<std::ops::Range<usize>>, SqlError> {
+    let tokens = Tokenizer::new(&SnowflakeDialect, sql).tokenize_with_location()?;
+    let offsets = crate::normalize::LineOffsets::new(sql);
     let mut statements = Vec::new();
     let mut start = 0;
     let mut has_content = false;
@@ -229,6 +232,11 @@ fn split_text(normalized: &str) -> Result<Vec<String>, SqlError> {
     let significant: Vec<&Token> =
         tokens.iter().map(|t| &t.token).filter(|t| !matches!(t, Token::Whitespace(_))).collect();
     let mut index = 0;
+    let trimmed = |start: usize, end: usize| {
+        let text = &sql[start..end];
+        let leading = text.len() - text.trim_start().len();
+        start + leading..start + text.trim_end().len()
+    };
     for twl in &tokens {
         if !matches!(twl.token, Token::Whitespace(_)) {
             let ends = blocks.feed(&twl.token, significant.get(index + 1).copied());
@@ -240,9 +248,9 @@ fn split_text(normalized: &str) -> Result<Vec<String>, SqlError> {
         }
         match &twl.token {
             Token::SemiColon => {
-                let end = offsets.byte_offset(normalized, twl.span.start.line, twl.span.start.column);
+                let end = offsets.byte_offset(sql, twl.span.start.line, twl.span.start.column);
                 if has_content {
-                    statements.push(normalized[start..end].trim().to_owned());
+                    statements.push(trimmed(start, end));
                 }
                 start = end + 1;
                 has_content = false;
@@ -252,7 +260,7 @@ fn split_text(normalized: &str) -> Result<Vec<String>, SqlError> {
         }
     }
     if has_content {
-        statements.push(normalized[start..].trim().to_owned());
+        statements.push(trimmed(start, sql.len()));
     }
     if statements.is_empty() {
         return Err(SqlError::Empty);
@@ -1149,6 +1157,14 @@ mod tests {
     fn splits_statements() {
         assert_eq!(split("select 1; select ';'; ").unwrap(), vec!["SELECT 1", "SELECT ';'"]);
         assert!(matches!(split(" ; -- nothing"), Err(SqlError::Empty)));
+    }
+
+    #[test]
+    fn statement_ranges_cover_the_text_as_written() {
+        let sql = "select 'é';\n  begin\n    let x := 1;\n    return x;\n  end;\nselect 2";
+        let ranges = statement_ranges(sql).unwrap();
+        let statements: Vec<&str> = ranges.into_iter().map(|r| &sql[r]).collect();
+        assert_eq!(statements, vec!["select 'é'", "begin\n    let x := 1;\n    return x;\n  end", "select 2"]);
     }
 
     #[test]

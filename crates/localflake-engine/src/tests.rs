@@ -688,3 +688,52 @@ fn cancelling_a_block_isnt_caught_by_its_handlers() {
     run(&mut s, "alter session set statement_timeout_in_seconds = 1");
     assert_eq!(fail(&mut s, "BEGIN LOOP NULL; END LOOP; END").code, "000630");
 }
+
+#[test]
+fn slices_results_across_batches() {
+    let mut s = session();
+    let result = run(&mut s, "select seq4() as n from table(generator(rowcount => 5000)) order by n");
+    assert_eq!(result.row_count(), 5000);
+    let page = result.slice(2047, 3);
+    assert_eq!(page.json_rows().unwrap(), vec![vec![v("2047")], vec![v("2048")], vec![v("2049")]]);
+    assert_eq!(result.slice(4999, 10).row_count(), 1);
+    assert_eq!(result.slice(6000, 10).row_count(), 0);
+}
+
+#[test]
+fn records_statements_in_the_history() {
+    let engine = Engine::open(None).unwrap();
+    let options =
+        SessionOptions { user: "DEV".into(), client: "tests".into(), database: Some("H".into()), ..Default::default() };
+    let mut s = engine.session(options.clone()).unwrap();
+    let failure = s
+        .execute(&Request {
+            sql: "create table t (a int); insert into t values (1), (2); select nope",
+            statement_count: Some(0),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(failure.completed.len(), 2);
+
+    let page = engine.history(0);
+    let records: Vec<_> = page.records.iter().map(|r| (r.sql.as_str(), r.status, r.rows)).collect();
+    assert_eq!(
+        records,
+        vec![
+            ("create table t (a int)", QueryStatus::Succeeded, Some(1)),
+            ("insert into t values (1), (2)", QueryStatus::Succeeded, Some(2)),
+            ("select nope", QueryStatus::Failed, None),
+        ]
+    );
+    let insert = &page.records[1];
+    assert_eq!((insert.user.as_str(), insert.client.as_str(), insert.database.as_deref()), ("DEV", "tests", Some("H")));
+    let duckdb_sql = engine.history_record(&insert.query_id).unwrap().duckdb_sql;
+    assert!(duckdb_sql.iter().any(|sql| sql.contains("INSERT INTO")), "{duckdb_sql:?}");
+    assert_eq!(page.records[2].error.as_ref().map(|e| e.code), Some(failure.error.code));
+    assert!(engine.history_record(&failure.query_id).is_some());
+
+    // Internal sessions (the web UI's object explorer) aren't recorded.
+    let mut internal = engine.session(SessionOptions { internal: true, ..options }).unwrap();
+    run(&mut internal, "show tables");
+    assert_eq!(engine.history(page.sequence).records.len(), 0);
+}

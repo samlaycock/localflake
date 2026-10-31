@@ -199,6 +199,34 @@ impl QueryResult {
         self.batches.iter().map(RecordBatch::num_rows).sum()
     }
 
+    /// The result with only `limit` rows from `offset` (for paging through it).
+    pub fn slice(&self, offset: usize, limit: usize) -> QueryResult {
+        let mut skip = offset;
+        let mut left = limit;
+        let mut batches = Vec::new();
+        for batch in &self.batches {
+            if left == 0 {
+                break;
+            }
+            let rows = batch.num_rows();
+            if skip >= rows {
+                skip -= rows;
+                continue;
+            }
+            let take = (rows - skip).min(left);
+            batches.push(batch.slice(skip, take));
+            left -= take;
+            skip = 0;
+        }
+        QueryResult {
+            query_id: self.query_id.clone(),
+            columns: self.columns.clone(),
+            batches,
+            kind: self.kind,
+            transfer: self.transfer.clone(),
+        }
+    }
+
     /// The JSON `rowset`.
     pub fn json_rows(&self) -> Result<Vec<Vec<Option<String>>>, EngineError> {
         let mut rows = Vec::with_capacity(self.row_count());
