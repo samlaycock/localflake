@@ -633,6 +633,64 @@ impl Rewriter<'_> {
                 let sum = binop(left.clone(), op.clone(), take(right));
                 func("sf_cast_like", vec![sum, left])
             }
+            // TIMESTAMP_TZ values compare as instants (see `typing::with_instants`).
+            Expr::BinaryOp {
+                left,
+                op:
+                    op @ (BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq),
+                right,
+            } => crate::typing::compare(self.ctx, take(left), op.clone(), take(right)),
+            Expr::IsDistinctFrom(left, right) => {
+                crate::typing::with_instants(self.ctx, vec![take(left), take(right)], |v| {
+                    let [left, right] = <[Expr; 2]>::try_from(v).unwrap();
+                    Expr::IsDistinctFrom(Box::new(left), Box::new(right))
+                })
+            }
+            Expr::IsNotDistinctFrom(left, right) => {
+                crate::typing::with_instants(self.ctx, vec![take(left), take(right)], |v| {
+                    let [left, right] = <[Expr; 2]>::try_from(v).unwrap();
+                    Expr::IsNotDistinctFrom(Box::new(left), Box::new(right))
+                })
+            }
+            Expr::Between { expr: value, negated, low, high } => {
+                let negated = *negated;
+                crate::typing::with_instants(self.ctx, vec![take(value), take(low), take(high)], |v| {
+                    let [value, low, high] = <[Expr; 3]>::try_from(v).unwrap();
+                    Expr::Between { expr: Box::new(value), negated, low: Box::new(low), high: Box::new(high) }
+                })
+            }
+            Expr::InList { expr: value, list, negated } => {
+                let negated = *negated;
+                let values = std::iter::once(take(value)).chain(std::mem::take(list)).collect();
+                crate::typing::with_instants(self.ctx, values, |mut v| {
+                    let value = v.remove(0);
+                    Expr::InList { expr: Box::new(value), list: v, negated }
+                })
+            }
+            Expr::InSubquery { expr: value, subquery, negated } => {
+                let subquery = std::mem::replace(subquery, Box::new(crate::ast::parse_query("SELECT 1")));
+                crate::typing::in_subquery(self.ctx, take(value), subquery, *negated)
+            }
+            // `CASE x WHEN a ...` compares `x` with each `a`.
+            Expr::Case { operand: Some(operand), conditions, .. } => {
+                let values =
+                    std::iter::once(take(operand)).chain(conditions.iter().map(|w| w.condition.clone())).collect();
+                let mut case = expr.clone();
+                crate::typing::with_instants(self.ctx, values, move |mut v| {
+                    if let Expr::Case { operand, conditions, .. } = &mut case {
+                        *operand = Some(Box::new(v.remove(0)));
+                        for (when, value) in conditions.iter_mut().zip(v) {
+                            when.condition = value;
+                        }
+                    }
+                    case
+                })
+            }
             Expr::Value(v) => match &v.value {
                 Value::Placeholder(p) => return self.placeholder(p).map(Some),
                 _ => return Ok(None),

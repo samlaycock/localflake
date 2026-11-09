@@ -1714,6 +1714,254 @@
       ]
     },
     {
+      "name": "session/timezone",
+      "steps": [
+        {
+          "sql": "create or replace table tz_t (tz timestamp_tz, ntz timestamp_ntz)"
+        },
+        {
+          "sql": "insert into tz_t select '2026-06-23T10:48:31.518-07:00'::timestamp_tz, '2026-06-23T10:48:31.518'::timestamp_ntz",
+          "rowcount": 1
+        },
+        {
+          "sql": "show parameters like 'TIMEZONE' in session",
+          "row_count": 1
+        },
+        {
+          "sql": "select \"value\", \"level\" from table(result_scan(last_query_id()))",
+          "rows": [
+            [
+              "America/Los_Angeles",
+              ""
+            ]
+          ]
+        },
+        {
+          "sql": "select to_varchar(convert_timezone('UTC', ntz), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3') from tz_t",
+          "rows": [
+            [
+              "2026-06-23T17:48:31.518"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where tz >= '2026-06-23T17:48:00.000'",
+          "rows": [
+            [
+              "0"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where date_trunc('millisecond', tz) = '2026-06-23T17:48:31.518'",
+          "rows": [
+            [
+              "0"
+            ]
+          ]
+        },
+        {
+          "sql": "alter session set timezone = 'UTC'"
+        },
+        {
+          "sql": "show parameters like 'TIMEZONE' in session",
+          "row_count": 1
+        },
+        {
+          "sql": "select \"value\", \"level\" from table(result_scan(last_query_id()))",
+          "rows": [
+            [
+              "UTC",
+              "SESSION"
+            ]
+          ]
+        },
+        {
+          "sql": "select to_varchar(convert_timezone('UTC', ntz), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3') from tz_t",
+          "rows": [
+            [
+              "2026-06-23T10:48:31.518"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where tz >= '2026-06-23T17:48:00.000'",
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where date_trunc('millisecond', tz) = '2026-06-23T17:48:31.518'",
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where tz >= ?",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "2026-06-23T17:48:00.000"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where tz = ?",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "2026-06-23 17:48:31.518"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where tz between ? and ? and tz in (?, '2020-01-01') and tz is not distinct from ?",
+          "binds": [
+            {
+              "type": "TEXT",
+              "value": "2026-06-23 17:48:31.518"
+            },
+            {
+              "type": "TEXT",
+              "value": "2026-06-23 17:48:31.518"
+            },
+            {
+              "type": "TEXT",
+              "value": "2026-06-23 17:48:31.518"
+            },
+            {
+              "type": "TEXT",
+              "value": "2026-06-23 17:48:31.518"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where tz in (select '2026-06-23 19:48:31.518 +02:00'::timestamp_tz) and decode(tz, '2026-06-23 17:48:31.518', true, false)",
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "sql": "select right(to_varchar(current_timestamp()), 5), to_varchar(tz) from tz_t",
+          "rows": [
+            [
+              "+0000",
+              "2026-06-23 10:48:31.518 -0700"
+            ]
+          ]
+        },
+        {
+          "sql": "alter session set timezone = 'Not/AZone'",
+          "error": {
+            "code": "002043",
+            "sqlstate": "42601"
+          }
+        },
+        {
+          "sql": "alter session unset timezone"
+        },
+        {
+          "sql": "select to_varchar(convert_timezone('UTC', ntz), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3') from tz_t",
+          "rows": [
+            [
+              "2026-06-23T17:48:31.518"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where tz >= '2026-06-23T17:48:00.000'",
+          "rows": [
+            [
+              "0"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where date_trunc('millisecond', tz) = '2026-06-23T17:48:31.518'",
+          "rows": [
+            [
+              "0"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "connection/timezone-parameter",
+      "connect": {
+        "session_parameters": {
+          "TIMEZONE": "UTC"
+        }
+      },
+      "steps": [
+        {
+          "sql": "create or replace table tz_t (tz timestamp_tz, ntz timestamp_ntz)"
+        },
+        {
+          "sql": "insert into tz_t select '2026-06-23T10:48:31.518-07:00'::timestamp_tz, '2026-06-23T10:48:31.518'::timestamp_ntz",
+          "rowcount": 1
+        },
+        {
+          "sql": "show parameters like 'TIMEZONE' in session",
+          "row_count": 1
+        },
+        {
+          "sql": "select \"value\", \"level\" from table(result_scan(last_query_id()))",
+          "rows": [
+            [
+              "UTC",
+              "SESSION"
+            ]
+          ]
+        },
+        {
+          "sql": "select to_varchar(convert_timezone('UTC', ntz), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF3') from tz_t",
+          "rows": [
+            [
+              "2026-06-23T10:48:31.518"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where tz >= '2026-06-23T17:48:00.000'",
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "sql": "select count(*) from tz_t where date_trunc('millisecond', tz) = '2026-06-23T17:48:31.518'",
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        }
+      ]
+    },
+    {
       "name": "stages/put-copy-get",
       "files": {
         "people.csv": "1,Ada\n2,Grace\n"

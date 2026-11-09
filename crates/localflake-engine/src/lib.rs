@@ -21,7 +21,7 @@ mod stage;
 mod tz;
 mod xml;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,8 +40,14 @@ pub use history::{HistoryPage, QueryRecord, QueryStatus};
 pub use stage::Transfer;
 
 const DEFAULT_SCHEMA: &str = "PUBLIC";
-/// Snowflake's default for the TIMEZONE parameter.
-const DEFAULT_TIMEZONE: &str = "America/Los_Angeles";
+/// Parameters honoured when a request sends them (`parameters` in the query
+/// request): they apply to that request only, over the session and account.
+const QUERY_PARAMETERS: &[&str] = &["TIMEZONE"];
+
+/// Whether `name` is a time zone the engine knows (an IANA name, e.g. `UTC` or `Europe/London`).
+fn known_timezone(name: &str) -> bool {
+    name.parse::<chrono_tz::Tz>().is_ok()
+}
 
 /// Loads DuckDB's ICU extension (time zone support): the copy embedded at
 /// build time if there is one (see `build.rs`), else DuckDB's runtime install.
@@ -112,6 +118,8 @@ struct Inner {
     /// Whether DuckDB's ICU extension is loaded. With it, TIMESTAMP_LTZ follows
     /// the session's TIMEZONE; without it everything runs in UTC.
     icu: bool,
+    /// Account parameters, the defaults every new session starts with.
+    account_parameters: Mutex<BTreeMap<String, String>>,
     data_dir: Option<PathBuf>,
     results: Mutex<ResultStore>,
     next_session: AtomicU64,
@@ -310,6 +318,8 @@ pub struct Request<'a> {
     pub describe_only: bool,
     /// `MULTI_STATEMENT_COUNT` for this request (0 = any number).
     pub statement_count: Option<usize>,
+    /// Parameters for this request only, over the session's (see `QUERY_PARAMETERS`).
+    pub parameters: Vec<(String, String)>,
     /// Cancels the request from another thread.
     pub cancel: CancelToken,
 }
@@ -347,6 +357,10 @@ impl Engine {
                 root: Mutex::new(root),
                 _db: db,
                 icu,
+                // Without ICU, TIMESTAMP_LTZ can only be UTC, so the account runs in UTC.
+                account_parameters: Mutex::new(
+                    [("TIMEZONE".to_owned(), "UTC".to_owned())].into_iter().filter(|_| !icu).collect(),
+                ),
                 data_dir: data_dir.map(Path::to_owned),
                 results: Default::default(),
                 next_session: AtomicU64::new(1),
@@ -363,13 +377,9 @@ impl Engine {
     pub fn session(&self, options: SessionOptions) -> Result<Session, EngineError> {
         let conn = self.inner.root.lock().unwrap().try_clone()?;
         conn.execute_batch("SET default_null_order = 'nulls_last_on_asc_first_on_desc'; SET TimeZone = 'UTC';")?;
-        let mut parameters = options.parameters;
-        // Snowflake's default TIMEZONE, when time zones can be honoured.
-        if self.inner.icu && !parameters.iter().any(|(k, _)| k.eq_ignore_ascii_case("TIMEZONE")) {
-            parameters.insert(0, ("TIMEZONE".to_owned(), DEFAULT_TIMEZONE.to_owned()));
-        }
         conn.execute_batch(&localflake_sql::macros())?;
         let ctx = Context {
+            account_parameters: self.inner.account_parameters.lock().unwrap().clone(),
             account: options.account,
             user: options.user,
             role: Some(options.role.unwrap_or_else(|| "ACCOUNTADMIN".to_owned())),
@@ -392,8 +402,10 @@ impl Engine {
             client: options.client,
             internal: options.internal,
             duckdb_log: Default::default(),
+            duckdb_timezone: "UTC".to_owned(),
         };
-        session.set_parameters(parameters)?;
+        session.set_parameters(options.parameters)?;
+        session.sync_timezone()?;
         if let Some(database) = options.database {
             let exists = session.database_exists(&database)?;
             if !exists && self.inner.create_missing_databases.load(Ordering::Relaxed) {
@@ -405,6 +417,21 @@ impl Engine {
             }
         }
         Ok(session)
+    }
+
+    /// Sets an account parameter, the default for sessions started afterwards
+    /// (sessions override it with `ALTER SESSION`, requests with their own
+    /// parameters). Only `TIMEZONE` is supported.
+    pub fn set_account_parameter(&self, name: &str, value: &str) -> Result<(), EngineError> {
+        let name = name.to_uppercase();
+        if name != "TIMEZONE" {
+            return Err(EngineError::internal(format!("unsupported account parameter {name}")));
+        }
+        if !known_timezone(value) {
+            return Err(EngineError::invalid_parameter(&name, value));
+        }
+        self.inner.account_parameters.lock().unwrap().insert(name, value.to_owned());
+        Ok(())
     }
 
     /// See `Inner::create_missing_databases`.
@@ -483,6 +510,8 @@ pub struct Session {
     internal: bool,
     /// The DuckDB SQL the current statement has run, for the query history.
     duckdb_log: history::DuckdbLog,
+    /// The connection's DuckDB `TimeZone` setting (see `sync_timezone`).
+    duckdb_timezone: String,
 }
 
 impl Drop for Session {
@@ -532,13 +561,33 @@ impl Session {
         localflake_sql::DEFAULT_PARAMETERS
             .iter()
             .filter(|(k, _)| REPORTED.contains(k))
-            .map(|(k, v)| ((*k).to_owned(), self.ctx.parameters.get(*k).cloned().unwrap_or_else(|| (*v).to_owned())))
+            .map(|(k, v)| ((*k).to_owned(), self.ctx.session_parameter(k).unwrap_or(v).to_owned()))
             .collect()
     }
 
     /// Runs a request, returning one result per statement. Results (and
     /// failures) are stored under their query IDs.
     pub fn execute(&mut self, request: &Request) -> Result<Vec<Arc<QueryResult>>, Failure> {
+        let mut query_parameters = BTreeMap::new();
+        for (key, value) in &request.parameters {
+            let key = key.to_uppercase();
+            if !QUERY_PARAMETERS.contains(&key.as_str()) {
+                continue;
+            }
+            if key == "TIMEZONE" && !known_timezone(value) {
+                return Err(self.fail(request.sql, EngineError::invalid_parameter(&key, value)));
+            }
+            query_parameters.insert(key, value.clone());
+        }
+        self.ctx.query_parameters = query_parameters;
+        let outcome = self.execute_statements(request);
+        self.ctx.query_parameters.clear();
+        // Back to the session's time zone; a failure here surfaces on the next statement.
+        let _ = self.sync_timezone();
+        outcome
+    }
+
+    fn execute_statements(&mut self, request: &Request) -> Result<Vec<Arc<QueryResult>>, Failure> {
         let statements = localflake_sql::split(request.sql).map_err(|e| self.fail(request.sql, e.into()))?;
         // A single statement is reported as sent, with any trailing semicolon.
         let original = match statements.len() {
@@ -633,14 +682,20 @@ impl Session {
             Ok(Command::Sql(probe)) if types.sites() > 0 => {
                 // Each prepare only types the innermost sites (see `probe`), so
                 // refine until every site has a type or a round learns nothing.
-                let mut known = probe::site_types(&self.conn, &probe_placeholders(&probe.sql, binds));
+                // Sites around unresolved sites are typed in a later round (see `SiteTypes::deferred`).
+                let learn = |sql: &str| {
+                    let mut learned = probe::site_types(&self.conn, &probe_placeholders(sql, binds));
+                    learned.retain(|id, _| !types.deferred().contains(id));
+                    learned
+                };
+                let mut known = learn(&probe.sql);
                 for _ in 0..8 {
                     types.refine(known.clone());
                     let Ok(Command::Sql(next)) = localflake_sql::translate_statement(sql, &self.ctx) else { break };
                     if types.unknown() == 0 {
                         break;
                     }
-                    let learned = probe::site_types(&self.conn, &probe_placeholders(&next.sql, binds));
+                    let learned = learn(&next.sql);
                     let before = known.len();
                     known.extend(learned);
                     if known.len() == before {
@@ -728,7 +783,7 @@ impl Session {
             database: self.ctx.database.as_deref(),
             schema: self.ctx.schema.as_deref(),
             query_tag: self.ctx.parameters.get("QUERY_TAG").map(String::as_str),
-            timezone: self.ctx.parameters.get("TIMEZONE").map(String::as_str),
+            timezone: self.ctx.parameter("TIMEZONE"),
             sql: &self.ctx.statement,
         });
         self.duckdb_log.start();
@@ -751,8 +806,9 @@ impl Session {
         bindings: &[Vec<Bind>],
         describe_only: bool,
     ) -> Result<QueryResult, EngineError> {
+        self.sync_timezone()?;
         // TIMESTAMP_TZ casts read the time zone of the statement being executed.
-        let _zone = tz::enter(self.ctx.parameters.get("TIMEZONE").map_or("UTC", String::as_str));
+        let _zone = tz::enter(self.ctx.parameter("TIMEZONE").unwrap_or("UTC"));
         let result = self.run_translated(sql, query_id, bindings, describe_only);
         self.drop_load_tables();
         result
@@ -837,10 +893,8 @@ impl Session {
                     if key == "TIMESTAMP_TYPE_MAPPING" {
                         self.ctx.timestamp_type_mapping = TimestampMapping::Ntz;
                     }
-                    if key == "TIMEZONE" && self.engine.inner.icu {
-                        self.set_parameters(vec![("TIMEZONE".to_owned(), DEFAULT_TIMEZONE.to_owned())])?;
-                    }
                 }
+                self.sync_timezone()?;
                 ok()
             }
             Command::SetVariables(assignments) => {
@@ -1257,14 +1311,15 @@ impl Session {
         })
     }
 
+    /// Sets session parameters. An invalid time zone fails before anything changes.
     fn set_parameters(&mut self, parameters: Vec<(String, String)>) -> Result<(), EngineError> {
+        if let Some((_, zone)) =
+            parameters.iter().find(|(k, v)| k.eq_ignore_ascii_case("TIMEZONE") && !known_timezone(v))
+        {
+            return Err(EngineError::invalid_parameter("TIMEZONE", zone));
+        }
         for (key, value) in parameters {
             let key = key.to_uppercase();
-            if key == "TIMEZONE" && self.engine.inner.icu {
-                self.conn
-                    .execute_batch(&format!("SET TimeZone = {}", literal(&value)))
-                    .map_err(|_| EngineError::invalid_parameter("TIMEZONE", &value))?;
-            }
             if key == "TIMESTAMP_TYPE_MAPPING" {
                 self.ctx.timestamp_type_mapping = match value.to_uppercase().as_str() {
                     "TIMESTAMP_LTZ" => TimestampMapping::Ltz,
@@ -1273,6 +1328,22 @@ impl Session {
                 };
             }
             self.ctx.parameters.insert(key, value);
+        }
+        self.sync_timezone()
+    }
+
+    /// Points DuckDB's `TimeZone` (which TIMESTAMP_LTZ follows) at the TIMEZONE
+    /// in effect: the request's, else the session's, else the account's.
+    fn sync_timezone(&mut self) -> Result<(), EngineError> {
+        if !self.engine.inner.icu {
+            return Ok(());
+        }
+        let zone = self.ctx.parameter("TIMEZONE").unwrap_or("UTC").to_owned();
+        if zone != self.duckdb_timezone {
+            self.conn
+                .execute_batch(&format!("SET TimeZone = {}", literal(&zone)))
+                .map_err(|_| EngineError::invalid_parameter("TIMEZONE", &zone))?;
+            self.duckdb_timezone = zone;
         }
         Ok(())
     }

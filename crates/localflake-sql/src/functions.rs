@@ -340,7 +340,7 @@ fn rewrite_call(f: &mut Function, ctx: &Context) -> Result<Option<Expr>, SqlErro
             )
         }
         "EQUAL_NULL" => Expr::IsNotDistinctFrom(Box::new(nested(arg(0)?)), Box::new(nested(arg(1)?))),
-        "DECODE" => decode(args()?, &name)?,
+        "DECODE" => decode(ctx, args()?, &name)?,
         "GREATEST" | "LEAST" | "CONCAT" | "CONCAT_WS" => {
             // Snowflake returns NULL if any argument is NULL; DuckDB skips NULLs.
             let args = args()?;
@@ -1618,7 +1618,7 @@ fn to_number(name: &str, args: Vec<Expr>) -> Result<Expr, SqlError> {
     Ok(if try_ { try_cast(rounded, target) } else { cast(rounded, target) })
 }
 
-fn decode(args: Vec<Expr>, name: &str) -> Result<Expr, SqlError> {
+fn decode(ctx: &Context, args: Vec<Expr>, name: &str) -> Result<Expr, SqlError> {
     let mut args = args.into_iter();
     let subject = args.next().ok_or_else(|| SqlError::Arguments(name.to_owned()))?;
     let rest: Vec<Expr> = args.collect();
@@ -1626,7 +1626,11 @@ fn decode(args: Vec<Expr>, name: &str) -> Result<Expr, SqlError> {
     let conditions = pairs
         .iter()
         .map(|[search, result]| {
-            let matches = Expr::IsNotDistinctFrom(Box::new(nested(subject.clone())), Box::new(nested(search.clone())));
+            // TIMESTAMP_TZ values match by instant (see `typing::with_instants`).
+            let matches = crate::typing::with_instants(ctx, vec![subject.clone(), search.clone()], |v| {
+                let [subject, search] = <[Expr; 2]>::try_from(v).unwrap();
+                Expr::IsNotDistinctFrom(Box::new(nested(subject)), Box::new(nested(search)))
+            });
             (matches, result.clone())
         })
         .collect();

@@ -16,8 +16,12 @@ pub struct Context {
     /// Session variables set with `SET`, already rendered as DuckDB literals.
     pub variables: HashMap<String, String>,
     pub timestamp_type_mapping: TimestampMapping,
-    /// Session parameters changed from their defaults with `ALTER SESSION`.
+    /// Session parameters set at login or with `ALTER SESSION`.
     pub parameters: BTreeMap<String, String>,
+    /// Account parameters: the defaults sessions start with (see [`Context::parameter`]).
+    pub account_parameters: BTreeMap<String, String>,
+    /// Parameters sent with the request being run, for that request only.
+    pub query_parameters: BTreeMap<String, String>,
     /// Operand types for type-directed rewrites (see [`crate::SiteTypes`]).
     pub types: crate::SiteTypes,
     /// The statement being run, as written (for `CURRENT_STATEMENT()`).
@@ -28,7 +32,6 @@ pub struct Context {
 }
 
 /// Session parameters and their defaults, as reported by `SHOW PARAMETERS`.
-/// `TIMEZONE` defaults to UTC: without time zone data DuckDB can only work in UTC.
 pub const DEFAULT_PARAMETERS: &[(&str, &str)] = &[
     ("ABORT_DETACHED_QUERY", "false"),
     ("AUTOCOMMIT", "true"),
@@ -52,7 +55,7 @@ pub const DEFAULT_PARAMETERS: &[(&str, &str)] = &[
     ("TIMESTAMP_OUTPUT_FORMAT", "YYYY-MM-DD HH24:MI:SS.FF3 TZHTZM"),
     ("TIMESTAMP_TYPE_MAPPING", "TIMESTAMP_NTZ"),
     ("TIMESTAMP_TZ_OUTPUT_FORMAT", ""),
-    ("TIMEZONE", "UTC"),
+    ("TIMEZONE", "America/Los_Angeles"),
     ("TIME_INPUT_FORMAT", "AUTO"),
     ("TIME_OUTPUT_FORMAT", "HH24:MI:SS"),
     ("TRANSACTION_DEFAULT_ISOLATION_LEVEL", "READ COMMITTED"),
@@ -70,7 +73,27 @@ pub enum TimestampMapping {
     Tz,
 }
 
+/// A parameter's built-in default, if it has one.
+pub fn default_parameter(name: &str) -> Option<&'static str> {
+    DEFAULT_PARAMETERS.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
+}
+
 impl Context {
+    /// A parameter's value in effect: the request's, else the session's, else
+    /// the account's, else the default.
+    pub fn parameter(&self, name: &str) -> Option<&str> {
+        self.query_parameters.get(name).map(String::as_str).or_else(|| self.session_parameter(name))
+    }
+
+    /// A parameter's value for the session, ignoring the current request's parameters.
+    pub fn session_parameter(&self, name: &str) -> Option<&str> {
+        self.parameters
+            .get(name)
+            .or_else(|| self.account_parameters.get(name))
+            .map(String::as_str)
+            .or_else(|| default_parameter(name))
+    }
+
     /// `LAST_QUERY_ID(n)`: positive counts from the session start, negative from the end.
     pub fn last_query_id(&self, n: i64) -> Option<&str> {
         let index =

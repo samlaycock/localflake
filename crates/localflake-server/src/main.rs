@@ -30,6 +30,12 @@ struct Args {
     #[arg(long, env = "LOCALFLAKE_MISSING_DATABASE", default_value = "create", value_parser = ["create", "ignore"])]
     missing_database: String,
 
+    /// The account's TIMEZONE (an IANA name such as `UTC`): the time zone for
+    /// values without one, unless a session (`ALTER SESSION SET TIMEZONE`) or a
+    /// query sets its own. Snowflake's default, `America/Los_Angeles`, if unset.
+    #[arg(long, env = "LOCALFLAKE_TIMEZONE")]
+    timezone: Option<String>,
+
     /// Serve the web UI (a SQL worksheet, object explorer and query history)
     /// at `/__localflake/ui/`.
     #[arg(long, env = "LOCALFLAKE_UI", default_value_t = true, action = clap::ArgAction::Set)]
@@ -48,6 +54,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let engine = Engine::open(args.data_dir.as_deref())?;
     engine.set_create_missing_databases(args.missing_database == "create");
+    if let Some(zone) = &args.timezone {
+        engine
+            .set_account_parameter("TIMEZONE", zone)
+            .map_err(|_| anyhow::anyhow!("LOCALFLAKE_TIMEZONE: unknown time zone {zone:?}"))?;
+    }
     let listener = tokio::net::TcpListener::bind(args.addr).await?;
     let addr = listener.local_addr()?;
     tracing::info!(%addr, data_dir = ?args.data_dir, "localflake listening");
