@@ -35,7 +35,7 @@ The spec covers:
 - multi-statement requests, async queries and describe-only requests
 - error codes, SQLSTATEs and query IDs, and that a session survives an error
 - transactions (rollback, commit after a failed statement, `AUTOCOMMIT = FALSE`)
-- `ALTER SESSION` and session variables
+- `ALTER SESSION` and session variables, and `TIMEZONE` at login and in the session
 - stages: `PUT`, `LIST`, `COPY INTO`, unload, `GET`, and querying staged files
 - Snowflake Scripting: bare blocks and `EXECUTE IMMEDIATE $$...$$`, a block
   inside a multi-statement request, async blocks, and uncaught exceptions

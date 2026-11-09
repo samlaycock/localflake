@@ -687,25 +687,30 @@ fn table_filters(name: &[String], ctx: &Context) -> Result<Vec<String>, SqlError
     )])
 }
 
+/// `SHOW PARAMETERS`: the session's values (or, `IN ACCOUNT`, the account's)
+/// and the level each was set at. Parameters sent with the request don't show.
 fn parameters_sql(show: &Show, ctx: &Context) -> String {
-    let mut params: Vec<(String, String)> =
-        crate::context::DEFAULT_PARAMETERS.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
-    for (key, value) in &ctx.parameters {
-        match params.iter_mut().find(|(k, _)| k == key) {
-            Some(existing) => existing.1 = value.clone(),
-            None => params.push((key.clone(), value.clone())),
+    let account = show.scope == Scope::Account;
+    let mut keys: Vec<&str> = crate::context::DEFAULT_PARAMETERS.iter().map(|(k, _)| *k).collect();
+    let set = ctx.account_parameters.keys().chain(ctx.parameters.keys().filter(|_| !account));
+    for key in set {
+        if !keys.contains(&key.as_str()) {
+            keys.push(key);
         }
     }
-    let rows: Vec<String> = params
+    let rows: Vec<String> = keys
         .iter()
-        .map(|(k, v)| {
-            let default = crate::context::DEFAULT_PARAMETERS.iter().find(|(d, _)| *d == k).map_or("", |(_, d)| *d);
-            let level = if ctx.parameters.contains_key(k) { "SESSION" } else { "" };
+        .map(|&k| {
+            let (value, level) = match (ctx.parameters.get(k).filter(|_| !account), ctx.account_parameters.get(k)) {
+                (Some(v), _) => (v.as_str(), "SESSION"),
+                (None, Some(v)) => (v.as_str(), "ACCOUNT"),
+                (None, None) => (crate::context::default_parameter(k).unwrap_or_default(), ""),
+            };
             format!(
                 "({}, {}, {}, {}, '', 'STRING')",
                 quote_literal(k),
-                quote_literal(v),
-                quote_literal(default),
+                quote_literal(value),
+                quote_literal(crate::context::default_parameter(k).unwrap_or_default()),
                 quote_literal(level)
             )
         })

@@ -350,7 +350,8 @@ URLs such as `s3://` are rejected).
 | quoted `"mixedCase"` names | encoded names | a marker after each lower-case letter makes case variants distinct, since DuckDB matches names case-insensitively |
 
 Some results depend on operand types the translator can't see (decimal
-division scales, text conversion of timestamps, TIMESTAMP_TZ arithmetic). For
+division scales, text conversion of timestamps, TIMESTAMP_TZ arithmetic, and
+comparisons, which match TIMESTAMP_TZ values by instant). For
 those, the engine prepares the statement once with `sf_probe` markers, whose
 bind callbacks record each operand's type, then translates it again with the
 types known.
@@ -438,6 +439,7 @@ list.
 | `--data-dir` | `LOCALFLAKE_DATA_DIR` | unset (in memory) | Directory for persistent databases, one DuckDB file each, and staged files |
 | `--result-format` | `LOCALFLAKE_RESULT_FORMAT` | `auto` | `auto` uses Arrow for drivers that request it from Snowflake, `json` or `arrow` forces one |
 | `--missing-database` | `LOCALFLAKE_MISSING_DATABASE` | `create` | Logging in with an unknown database creates it, or `ignore` logs in without a current database, as Snowflake does |
+| `--timezone` | `LOCALFLAKE_TIMEZONE` | `America/Los_Angeles` | The account's `TIMEZONE` (an IANA name such as `UTC`); see [Time zones](#time-zones) |
 | `--ui` | `LOCALFLAKE_UI` | `true` | Serve the [web UI](#web-ui) at `/__localflake/ui/` (and redirect `/` to it) |
 
 Logging uses `RUST_LOG`. For example, `RUST_LOG=localflake_engine=debug` logs
@@ -446,12 +448,31 @@ shows it too).
 
 ### Time zones
 
+`TIMEZONE` works as in Snowflake. It sets the zone for values that don't
+carry one: offset-less text read as `TIMESTAMP_TZ` or `TIMESTAMP_LTZ`
+(including literals and binds compared with a `TIMESTAMP_TZ` column),
+`TIMESTAMP_NTZ` converted to either, 2-argument `CONVERT_TIMEZONE`, and how
+`TIMESTAMP_LTZ` and `CURRENT_TIMESTAMP()` are shown. Values with an explicit
+offset don't change. The most specific setting wins:
+
+1. **Query:** `TIMEZONE` in the request's parameters, for that statement only
+   (e.g. Python's `cursor.execute(sql, _statement_params={"TIMEZONE": "UTC"})`).
+2. **Session:** `ALTER SESSION SET TIMEZONE = 'UTC'` (`UNSET` goes back to the
+   account's), or `TIMEZONE` in the session parameters at login.
+3. **Account:** `LOCALFLAKE_TIMEZONE` (`--timezone`), else Snowflake's default
+   `America/Los_Angeles`.
+
+`SHOW PARAMETERS LIKE 'TIMEZONE' [IN SESSION | IN ACCOUNT]` reports the value
+and the level it was set at. Unknown zone names fail with error 002043, and a
+failed `ALTER SESSION` changes nothing.
+
 Time zones use DuckDB's ICU extension, which is embedded in the binary at build
 time, so localflake never needs the network at runtime. The build takes it from
 `LOCALFLAKE_ICU_EXTENSION` (a path, for offline builds), DuckDB's own cache in
 `~/.duckdb/extensions`, or a one-off download from extensions.duckdb.org. If
 none is available the build still succeeds and localflake installs ICU on first
-start instead. `LOCALFLAKE_NO_ICU=1` runs everything in UTC.
+start instead. `LOCALFLAKE_NO_ICU=1` turns ICU off. `TIMESTAMP_LTZ` is then
+always UTC, and the account `TIMEZONE` defaults to `UTC`.
 
 ## Roadmap
 

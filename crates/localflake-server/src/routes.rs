@@ -216,11 +216,7 @@ async fn login(State(state): State<AppState>, Query(params): Query<LoginParams>,
         schema: non_empty(params.schema_name),
         warehouse: non_empty(params.warehouse),
         role: non_empty(params.role_name),
-        parameters: data
-            .session_parameters
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())))
-            .collect(),
+        parameters: parameter_values(&data.session_parameters),
         client: app,
         internal: false,
     };
@@ -312,6 +308,7 @@ async fn query(
         Value::String(s) => s.parse().ok(),
         _ => None,
     });
+    let parameters = parameter_values(&request.parameters);
 
     let forced = state.forced_format;
     let multi_statement = state.multi_statement.clone();
@@ -335,6 +332,7 @@ async fn query(
             bindings,
             describe_only: request.describe_only,
             statement_count: statement_count.map(|n| n as usize),
+            parameters,
             cancel,
         });
         entry.end(&client);
@@ -378,6 +376,14 @@ async fn query(
         Ok(envelope) => Json(envelope).into_response(),
         Err(err) => internal(err),
     }
+}
+
+/// Parameters from a login or query request as text (drivers send some as JSON numbers or booleans).
+fn parameter_values(parameters: &serde_json::Map<String, Value>) -> Vec<(String, String)> {
+    parameters
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())))
+        .collect()
 }
 
 #[derive(serde::Deserialize)]

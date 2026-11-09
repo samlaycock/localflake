@@ -120,3 +120,114 @@ query
 select to_varchar(ts, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZH:TZM') from tz_fmt_acct where account_id in (select value::string from table(flatten(input => parse_json('["A"]'))))
 ----
 2026-01-01T12:00:00.000+00:00
+
+# TIMESTAMP_TZ values compare as instants, whatever their offsets. Text and
+# TIMESTAMP_NTZ on the other side take the session's time zone.
+statement ok
+create or replace table tz_cmp (tz timestamp_tz, ntz timestamp_ntz)
+
+statement ok
+insert into tz_cmp select '2026-06-23T10:48:31.518-07:00'::timestamp_tz, '2026-06-23T10:48:31.518'::timestamp_ntz
+
+query
+select tz = '2026-06-23 17:48:31.518 +00:00'::timestamp_tz, tz <> '2026-06-23 19:48:31.518 +02:00'::timestamp_tz, tz >= '2026-06-23 19:48:31.518 +02:00'::timestamp_tz, tz < '2026-06-23 19:48:31.519 +02:00'::timestamp_tz from tz_cmp
+----
+true|false|true|true
+
+query
+select tz = '2026-06-23 10:48:31.518', tz = ntz, date_trunc('millisecond', tz) = '2026-06-23T10:48:31.518' from tz_cmp
+----
+true|true|true
+
+query
+select to_varchar(date_trunc('hour', tz)), to_varchar(date_trunc('day', tz)), date_trunc('day', tz)::varchar, to_varchar(dateadd(hour, 1, tz)) from tz_cmp
+----
+2026-06-23 10:00:00.000 -0700|2026-06-23 00:00:00.000 -0700|2026-06-23 00:00:00.000 -0700|2026-06-23 11:48:31.518 -0700
+
+statement ok
+alter session set timezone = 'UTC'
+
+query
+select count(*) from tz_cmp where tz >= '2026-06-23T17:48:00.000'
+----
+1
+
+query
+select tz = '2026-06-23 17:48:31.518', tz = ntz, count(*) over (), date_trunc('millisecond', tz) = '2026-06-23T17:48:31.518' from tz_cmp
+----
+true|false|1|true
+
+query
+select to_varchar(convert_timezone('UTC', ntz), 'YYYY-MM-DD"T"HH24:MI:SS.FF3') from tz_cmp
+----
+2026-06-23T10:48:31.518
+
+statement ok
+alter session set timezone = 'America/Los_Angeles'
+
+query
+select to_varchar(convert_timezone('UTC', ntz), 'YYYY-MM-DD"T"HH24:MI:SS.FF3'), (select count(*) from tz_cmp where tz >= '2026-06-23T17:48:00.000') from tz_cmp
+----
+2026-06-23T17:48:31.518|0
+
+# Every kind of comparison matches TIMESTAMP_TZ values by instant: BETWEEN,
+# IN lists and subqueries, IS [NOT] DISTINCT FROM, simple CASE and DECODE,
+# and scalar subqueries on either side.
+statement ok
+alter session set timezone = 'UTC'
+
+statement ok
+create or replace table tz_other (tz timestamp_tz, s varchar, n int)
+
+statement ok
+insert into tz_other values ('2026-06-23 19:48:31.518 +02:00', '2026-06-23 17:48:31.518', 1), ('2020-01-01 00:00:00 +00:00', 'x', 2)
+
+query
+select tz between '2026-06-23 17:48:31.518' and '2026-06-23 17:48:31.518', tz not between '2026-06-23 17:48:31.518' and '2026-06-23 17:48:31.518' from tz_cmp
+----
+true|false
+
+query
+select tz in ('2026-06-23 17:48:31.518', '2020-01-01'), tz not in ('2026-06-23 17:48:31.518'), tz in (ntz), tz in (null, '2026-06-23 17:48:31.518') from tz_cmp
+----
+true|false|false|true
+
+query
+select tz is not distinct from '2026-06-23 17:48:31.518', tz is distinct from '2026-06-23 17:48:31.518' from tz_cmp
+----
+true|false
+
+query
+select case tz when '2026-06-23 17:48:31.518' then 'hit' else 'miss' end, decode(tz, '2026-06-23 17:48:31.518', 'hit', 'miss') from tz_cmp
+----
+hit|hit
+
+query
+select tz in (select tz from tz_other), tz not in (select tz from tz_other), tz in (select s from tz_other where n = 1) from tz_cmp
+----
+true|false|true
+
+query
+select tz = (select max(tz) from tz_other), (select max(tz) from tz_other) = tz, tz = (select max(s) from tz_other where n = 1) from tz_cmp
+----
+true|true|true
+
+query
+select (select count(*) from tz_other o where o.tz = t.tz), exists (select 1 from tz_other o where o.tz = t.tz), t.tz in (select o.tz from tz_other o where o.n = 1 and o.tz >= t.tz) from tz_cmp t
+----
+1|true|true
+
+# Other types compare as before.
+query
+select n, n in (1, 3), s in (select s from tz_other where n = 2), s between 'a' and 'z', case 'x' when s then 'x' end, decode(n, 1, 'one', 'other') from tz_other order by n
+----
+1|true|false|false|NULL|one
+2|false|true|true|x|other
+
+statement ok
+alter session set timezone = 'America/Los_Angeles'
+
+query
+select tz between '2026-06-23 10:48:31.518' and '2026-06-23 10:48:31.518', tz in ('2026-06-23 17:48:31.518'), tz in (select ntz from tz_cmp) from tz_cmp
+----
+true|false|true

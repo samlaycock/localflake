@@ -116,6 +116,11 @@ pub fn parse_expr(sql: &str) -> Expr {
     Parser::new(&DuckDbDialect).try_with_sql(sql).and_then(|mut p| p.parse_expr()).expect("valid template expression")
 }
 
+/// Parses a DuckDB SQL query template.
+pub fn parse_query(sql: &str) -> sqlparser::ast::Query {
+    *Parser::new(&DuckDbDialect).try_with_sql(sql).and_then(|mut p| p.parse_query()).expect("valid template query")
+}
+
 /// Returns the string value of a literal (`'x'` or `$$x$$`), if `expr` is one.
 pub fn string_literal(expr: &Expr) -> Option<&str> {
     match expr {

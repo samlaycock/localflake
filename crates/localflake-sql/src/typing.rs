@@ -8,9 +8,9 @@
 //! module), and the second pass emits SQL for the actual types.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use sqlparser::ast::{BinaryOperator, DataType, ExactNumberInfo, Expr, Function, Value};
+use sqlparser::ast::{BinaryOperator, DataType, ExactNumberInfo, Expr, Function, Query, SetExpr, TableFactor, Value};
 
 use crate::Context;
 use crate::ast::*;
@@ -25,6 +25,9 @@ pub struct SiteTypes {
     sequences: Cell<u32>,
     /// Sites probed in a refine pass.
     unknown: Cell<u32>,
+    /// Sites probed in this pass whose operands contain another site's probe:
+    /// their operands' types aren't final yet (see [`SiteTypes::deferred`]).
+    deferred: RefCell<HashSet<u32>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +46,7 @@ impl SiteTypes {
     pub fn probe(&self) {
         self.next.set(0);
         self.sequences.set(0);
+        self.deferred.borrow_mut().clear();
         *self.mode.borrow_mut() = Mode::Probe;
     }
 
@@ -51,12 +55,20 @@ impl SiteTypes {
         self.next.set(0);
         self.sequences.set(0);
         self.unknown.set(0);
+        self.deferred.borrow_mut().clear();
         *self.mode.borrow_mut() = Mode::Refine(types);
     }
 
     /// Sites probed in the current pass for lack of a type.
     pub fn unknown(&self) -> u32 {
         self.unknown.get()
+    }
+
+    /// Sites probed in the current pass whose operands contain another site's
+    /// probe. Their recorded types describe the probe's stand-in SQL, not the
+    /// SQL the inner site will become, so they wait for a later pass.
+    pub fn deferred(&self) -> HashSet<u32> {
+        self.deferred.borrow().clone()
     }
 
     /// Starts a pass with the types a probe recorded.
@@ -97,26 +109,38 @@ impl SiteTypes {
     }
 
     fn raw_site(&self, operands: &[Expr], probe: &str) -> RawSite {
+        self.raw_site_in(operands, probe, "")
+    }
+
+    /// [`Self::raw_site`] for operands that come from `scope` (SQL text, e.g. a
+    /// subquery the operands are columns of): the site is deferred while
+    /// `scope` has probes of its own.
+    fn raw_site_in(&self, operands: &[Expr], probe: &str, scope: &str) -> RawSite {
         let id = self.next.get();
         self.next.set(id + 1);
         match &*self.mode.borrow() {
             Mode::Off => RawSite::Unknown,
-            Mode::Probe => {
-                let mut args = vec![number(id)];
-                args.extend(operands.iter().cloned());
-                RawSite::Probe(Box::new(func(probe, args)))
-            }
+            Mode::Probe => RawSite::Probe(Box::new(self.probe_call(id, operands, probe, scope))),
             Mode::Known(known) => known.get(&id).map_or(RawSite::Unknown, |t| RawSite::Typed(t.clone())),
             Mode::Refine(known) => match known.get(&id) {
                 Some(t) => RawSite::Typed(t.clone()),
                 None => {
                     self.unknown.set(self.unknown.get() + 1);
-                    let mut args = vec![number(id)];
-                    args.extend(operands.iter().cloned());
-                    RawSite::Probe(Box::new(func(probe, args)))
+                    RawSite::Probe(Box::new(self.probe_call(id, operands, probe, scope)))
                 }
             },
         }
+    }
+}
+
+impl SiteTypes {
+    fn probe_call(&self, id: u32, operands: &[Expr], probe: &str, scope: &str) -> Expr {
+        if scope.contains("sf_probe") || operands.iter().any(|e| e.to_string().contains("sf_probe")) {
+            self.deferred.borrow_mut().insert(id);
+        }
+        let mut args = vec![number(id)];
+        args.extend(operands.iter().cloned());
+        func(probe, args)
     }
 }
 
@@ -444,6 +468,129 @@ pub fn utc_if_timestamp_tz(ctx: &Context, value: Expr) -> Expr {
     }
 }
 
+/// Most operands one type probe takes (see the engine's `probe` module).
+pub const MAX_PROBED: usize = 8;
+
+/// Builds a predicate over `values` (`a = b`, `x BETWEEN lo AND hi`,
+/// `x IN (...)`, `CASE x WHEN ...`) that compares instants when one of them is
+/// a TIMESTAMP_TZ, as Snowflake does: the same instant at different offsets is
+/// equal, and text, TIMESTAMP_NTZ and DATE among them take the TIMEZONE in
+/// effect. Otherwise `build` gets `values` unchanged.
+///
+/// One site probes the values that aren't literals. DuckDB can't type a
+/// subquery while binding, so each subquery value gets its own site inside a
+/// query around it, `(SELECT __in.__value FROM (subquery) AS __in(__value))`,
+/// which also converts its column if need be. Nothing is probed when a value
+/// is a number or boolean literal, or none needs probing.
+pub fn with_instants(ctx: &Context, values: Vec<Expr>, build: impl FnOnce(Vec<Expr>) -> Expr) -> Expr {
+    let literal = |e: &Expr| matches!(e, Expr::Value(v) if !matches!(v.value, Value::Placeholder(_)));
+    let scalar = |e: &Expr| matches!(e, Expr::Value(v) if matches!(v.value, Value::Number(..) | Value::Boolean(_)));
+    let plain: Vec<Expr> = values.iter().filter(|e| !literal(e) && !matches!(e, Expr::Subquery(_))).cloned().collect();
+    if values.iter().any(scalar) || plain.len() > MAX_PROBED {
+        return build(values);
+    }
+    let plain_site = (!plain.is_empty()).then(|| ctx.types.raw_site(&plain, "sf_probe"));
+    let column = parse_expr("__in.__value");
+    let subquery_sites: Vec<Option<RawSite>> = values
+        .iter()
+        .map(|v| match v {
+            Expr::Subquery(q) => Some(ctx.types.raw_site_in(std::slice::from_ref(&column), "sf_probe", &q.to_string())),
+            _ => None,
+        })
+        .collect();
+    let sites: Vec<&RawSite> = plain_site.iter().chain(subquery_sites.iter().flatten()).collect();
+    if sites.is_empty() || sites.iter().any(|s| matches!(s, RawSite::Unknown)) {
+        return build(values);
+    }
+    // Probe pass: subquery probes filter the queries around them, and the
+    // values' probe wraps the predicate. The probes need only to bind.
+    if sites.iter().any(|s| matches!(s, RawSite::Probe(_))) {
+        let values = values
+            .into_iter()
+            .zip(subquery_sites)
+            .map(|(value, site)| match (value, site) {
+                (Expr::Subquery(q), Some(RawSite::Probe(probe))) => {
+                    Expr::Subquery(around_subquery(q, column.clone(), Some(is_null(*probe))))
+                }
+                (value, _) => value,
+            })
+            .collect();
+        let predicate = build(values);
+        return match plain_site {
+            Some(RawSite::Probe(probe)) => case(vec![(is_null(*probe), predicate)], None),
+            _ => predicate,
+        };
+    }
+    let mut types: Vec<String> = sites
+        .into_iter()
+        .flat_map(|s| match s {
+            RawSite::Typed(t) => t.clone(),
+            _ => vec![],
+        })
+        .collect();
+    types.extend(values.iter().filter_map(string_literal).map(|_| "VARCHAR".to_owned()));
+    if !are_instants(&types) {
+        return build(values);
+    }
+    let values = values
+        .into_iter()
+        .map(|value| match value {
+            Expr::Subquery(q) => Expr::Subquery(around_subquery(q, instant(column.clone()), None)),
+            value => instant(value),
+        })
+        .collect();
+    build(values)
+}
+
+/// Whether values of these (probed) types compare as instants: one is a
+/// TIMESTAMP_TZ and `sf_tz_instant` converts them all.
+fn are_instants(types: &[String]) -> bool {
+    /// DuckDB's names, as the probe reports them.
+    const INSTANTS: &[&str] = &["TIMESTAMP_NS", "TIMESTAMPTZ", "TIMESTAMP", "DATE", "VARCHAR"];
+    types.iter().any(|t| t == "TIMESTAMP_NS") && types.iter().all(|t| INSTANTS.contains(&t.as_str()))
+}
+
+/// `SELECT projection FROM (subquery) AS __in(__value) [WHERE filter]`.
+fn around_subquery(subquery: Box<Query>, projection: Expr, filter: Option<Expr>) -> Box<Query> {
+    let mut query = parse_query("SELECT __in.__value FROM (SELECT 1) AS __in(__value)");
+    if let SetExpr::Select(select) = query.body.as_mut() {
+        select.projection = vec![sqlparser::ast::SelectItem::UnnamedExpr(projection)];
+        select.selection = filter;
+        if let TableFactor::Derived { subquery: derived, .. } = &mut select.from[0].relation {
+            *derived = subquery;
+        }
+    }
+    Box::new(query)
+}
+
+/// A value as its instant (NULL stays NULL).
+fn instant(value: Expr) -> Expr {
+    match &value {
+        Expr::Value(v) if matches!(v.value, Value::Null) => value,
+        _ => func("sf_tz_instant", vec![value]),
+    }
+}
+
+/// `left op right` for a comparison operator, comparing TIMESTAMP_TZ values as
+/// instants (see [`with_instants`]).
+pub fn compare(ctx: &Context, left: Expr, op: BinaryOperator, right: Expr) -> Expr {
+    with_instants(ctx, vec![left, right], |v| {
+        let [left, right] = <[Expr; 2]>::try_from(v).unwrap();
+        binop(left, op, right)
+    })
+}
+
+/// `value [NOT] IN (subquery)`, comparing TIMESTAMP_TZ values as instants (see
+/// [`with_instants`]).
+pub fn in_subquery(ctx: &Context, value: Expr, subquery: Box<Query>, negated: bool) -> Expr {
+    with_instants(ctx, vec![value, Expr::Subquery(subquery)], |v| {
+        let [value, Expr::Subquery(subquery)] = <[Expr; 2]>::try_from(v).unwrap() else {
+            unreachable!("with_instants keeps subqueries")
+        };
+        Expr::InSubquery { expr: Box::new(value), subquery, negated }
+    })
+}
+
 /// `SYSTEM$TYPEOF(x)`: Snowflake's type with its storage class, e.g.
 /// `NUMBER(1,0)[SB1]`. Literals are described exactly; other expressions by
 /// their type, with the widest storage class Snowflake would use.
@@ -510,15 +657,13 @@ fn storage_class(n: i128) -> &'static str {
     }
 }
 
-/// The session's TIMEZONE, as a literal for the engine's conversion functions.
+/// The TIMEZONE in effect, as a literal for the engine's conversion functions.
 pub fn session_timezone(ctx: &Context) -> Expr {
     string(parameter(ctx, "TIMEZONE"))
 }
 
 fn parameter(ctx: &Context, name: &str) -> String {
-    ctx.parameters.get(name).cloned().unwrap_or_else(|| {
-        crate::DEFAULT_PARAMETERS.iter().find(|(k, _)| *k == name).map(|(_, v)| (*v).to_owned()).unwrap_or_default()
-    })
+    ctx.parameter(name).unwrap_or_default().to_owned()
 }
 
 /// Temporary sequences created in every session for `SEQ1`/`SEQ2`/`SEQ4`/`SEQ8`.

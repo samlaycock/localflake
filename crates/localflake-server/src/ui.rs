@@ -159,7 +159,7 @@ fn context_json(client: &ClientSession) -> Value {
         "warehouse": ctx.warehouse,
         "database": ctx.database,
         "schema": ctx.schema,
-        "timezone": ctx.parameters.get("TIMEZONE"),
+        "timezone": ctx.session_parameter("TIMEZONE"),
     })
 }
 

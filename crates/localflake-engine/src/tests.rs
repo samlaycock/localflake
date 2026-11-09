@@ -737,3 +737,180 @@ fn records_statements_in_the_history() {
     run(&mut internal, "show tables");
     assert_eq!(engine.history(page.sequence).records.len(), 0);
 }
+
+/// The acceptance queries for the TIMEZONE parameter: (A) 2-argument
+/// CONVERT_TIMEZONE of an NTZ, (B) a TIMESTAMP_TZ column against offset-less
+/// text, (C) the same through DATE_TRUNC.
+fn timezone_queries(s: &mut Session, parameters: &[(&str, &str)]) -> [Option<String>; 3] {
+    let queries = [
+        r#"select to_varchar(convert_timezone('UTC', ntz), 'YYYY-MM-DD"T"HH24:MI:SS.FF3') from tz_t"#,
+        "select count(*) from tz_t where tz >= '2026-06-23T17:48:00.000'",
+        "select count(*) from tz_t where date_trunc('millisecond', tz) = '2026-06-23T17:48:31.518'",
+    ];
+    queries.map(|sql| {
+        let parameters = parameters.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        let mut results = s
+            .execute(&Request { sql, parameters, ..Default::default() })
+            .unwrap_or_else(|f| panic!("{sql}: {}", f.error));
+        results.remove(0).json_rows().unwrap().remove(0).remove(0)
+    })
+}
+
+fn timezone_session(account: Option<&str>) -> Session {
+    let engine = Engine::open(None).unwrap();
+    if let Some(zone) = account {
+        engine.set_account_parameter("TIMEZONE", zone).unwrap();
+    }
+    let mut s = engine
+        .session(SessionOptions { user: "TESTER".into(), database: Some("TEST".into()), ..Default::default() })
+        .unwrap();
+    run(&mut s, "create or replace table tz_t (tz timestamp_tz, ntz timestamp_ntz)");
+    run(
+        &mut s,
+        "insert into tz_t select '2026-06-23T10:48:31.518-07:00'::timestamp_tz, '2026-06-23T10:48:31.518'::timestamp_ntz",
+    );
+    s
+}
+
+/// `(value, level)` of `SHOW PARAMETERS LIKE 'TIMEZONE' [IN ...]`.
+fn timezone_parameter(s: &mut Session, scope: &str) -> (Option<String>, Option<String>) {
+    let mut rows = rows(s, &format!("show parameters like 'TIMEZONE' {scope}"));
+    assert_eq!(rows.len(), 1);
+    let mut row = rows.remove(0);
+    (row.remove(1), row.remove(2))
+}
+
+const LOS_ANGELES: [&str; 3] = ["2026-06-23T17:48:31.518", "0", "0"];
+const UTC: [&str; 3] = ["2026-06-23T10:48:31.518", "1", "1"];
+
+fn expect(values: [&str; 3]) -> [Option<String>; 3] {
+    values.map(v)
+}
+
+#[test]
+fn timezone_defaults_to_los_angeles() {
+    let mut s = timezone_session(None);
+    if !s.engine.inner.icu {
+        return;
+    }
+    assert_eq!(timezone_queries(&mut s, &[]), expect(LOS_ANGELES));
+    assert_eq!(timezone_parameter(&mut s, "in session"), (v("America/Los_Angeles"), v("")));
+    assert_eq!(timezone_parameter(&mut s, "in account"), (v("America/Los_Angeles"), v("")));
+}
+
+#[test]
+fn timezone_levels() {
+    // Account.
+    let mut s = timezone_session(Some("UTC"));
+    assert_eq!(timezone_queries(&mut s, &[]), expect(UTC));
+    assert_eq!(timezone_parameter(&mut s, "in session"), (v("UTC"), v("ACCOUNT")));
+    assert_eq!(timezone_parameter(&mut s, "in account"), (v("UTC"), v("ACCOUNT")));
+
+    // The query's TIMEZONE overrides the account's, for that query only.
+    assert_eq!(timezone_queries(&mut s, &[("TIMEZONE", "America/Los_Angeles")]), expect(LOS_ANGELES));
+    assert_eq!(timezone_queries(&mut s, &[]), expect(UTC));
+
+    // Session over account; query over session; UNSET goes back to the account's.
+    run(&mut s, "alter session set timezone = 'America/Los_Angeles'");
+    assert_eq!(timezone_queries(&mut s, &[]), expect(LOS_ANGELES));
+    assert_eq!(timezone_parameter(&mut s, "in session"), (v("America/Los_Angeles"), v("SESSION")));
+    assert_eq!(timezone_parameter(&mut s, "in account"), (v("UTC"), v("ACCOUNT")));
+    assert_eq!(timezone_queries(&mut s, &[("timezone", "UTC")]), expect(UTC));
+    assert_eq!(timezone_queries(&mut s, &[]), expect(LOS_ANGELES));
+    run(&mut s, "alter session unset timezone");
+    assert_eq!(timezone_queries(&mut s, &[]), expect(UTC));
+    assert_eq!(timezone_parameter(&mut s, "in session"), (v("UTC"), v("ACCOUNT")));
+
+    // Parameters sent with SHOW PARAMETERS itself don't show.
+    let shown = s
+        .execute(&Request {
+            sql: "show parameters like 'TIMEZONE'",
+            parameters: vec![("TIMEZONE".into(), "Asia/Tokyo".into())],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(shown[0].json_rows().unwrap()[0][1], v("UTC"));
+}
+
+#[test]
+fn session_timezone_over_default() {
+    let mut s = timezone_session(None);
+    run(&mut s, "alter session set timezone = 'UTC'");
+    assert_eq!(timezone_queries(&mut s, &[]), expect(UTC));
+    if s.engine.inner.icu {
+        run(&mut s, "alter session unset timezone");
+        assert_eq!(timezone_queries(&mut s, &[]), expect(LOS_ANGELES));
+        assert_eq!(timezone_queries(&mut s, &[("TIMEZONE", "UTC")]), expect(UTC));
+        assert_eq!(timezone_queries(&mut s, &[]), expect(LOS_ANGELES));
+    }
+}
+
+#[test]
+fn login_timezone_is_session_level() {
+    let engine = Engine::open(None).unwrap();
+    engine.set_account_parameter("TIMEZONE", "Asia/Tokyo").unwrap();
+    let mut s = engine
+        .session(SessionOptions {
+            user: "TESTER".into(),
+            parameters: vec![("timezone".into(), "UTC".into())],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(timezone_parameter(&mut s, "in session"), (v("UTC"), v("SESSION")));
+    assert_eq!(
+        value(&mut s, "select '2024-01-01 12:00:00'::timestamp_tz::varchar"),
+        v("2024-01-01 12:00:00.000 +0000")
+    );
+}
+
+#[test]
+fn timezone_applies_to_ltz_and_current_timestamp_but_not_explicit_offsets() {
+    let mut s = timezone_session(Some("Asia/Tokyo"));
+    if !s.engine.inner.icu {
+        return;
+    }
+    let offset = |s: &mut Session, parameters: &[(&str, &str)]| {
+        let parameters = parameters.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        let sql = "select right(to_varchar(current_timestamp()), 5), \
+                   to_varchar('2024-01-15 12:00:00 +00:00'::timestamp_ltz), \
+                   to_varchar('2024-01-15 12:00:00 -07:00'::timestamp_tz), \
+                   to_varchar(tz) from tz_t";
+        s.execute(&Request { sql, parameters, ..Default::default() }).unwrap().remove(0).json_rows().unwrap().remove(0)
+    };
+    let explicit = [v("2024-01-15 12:00:00.000 -0700"), v("2026-06-23 10:48:31.518 -0700")];
+    let tokyo = offset(&mut s, &[]);
+    assert_eq!(tokyo[..2], [v("+0900"), v("2024-01-15 21:00:00.000 +0900")]);
+    assert_eq!(tokyo[2..], explicit);
+    let utc = offset(&mut s, &[("TIMEZONE", "UTC")]);
+    assert_eq!(utc[..2], [v("+0000"), v("2024-01-15 12:00:00.000 +0000")]);
+    assert_eq!(utc[2..], explicit);
+    run(&mut s, "alter session set timezone = 'America/New_York'");
+    assert_eq!(offset(&mut s, &[])[1], v("2024-01-15 07:00:00.000 -0500"));
+    assert_eq!(offset(&mut s, &[])[2..], explicit);
+}
+
+#[test]
+fn invalid_timezones_fail_and_change_nothing() {
+    let mut s = timezone_session(Some("UTC"));
+    run(&mut s, "alter session set timezone = 'Europe/London'");
+    let err = fail(&mut s, "alter session set timezone = 'Not/AZone'");
+    assert_eq!((err.code, err.message.contains("Not/AZone")), ("002043", true));
+    let err = fail(&mut s, "alter session set query_tag = 'x' timezone = 'Not/AZone'");
+    assert_eq!(err.code, "002043");
+    assert_eq!(timezone_parameter(&mut s, "in session"), (v("Europe/London"), v("SESSION")));
+    assert_eq!(value(&mut s, "show parameters like 'QUERY_TAG'"), v("QUERY_TAG"));
+    assert_eq!(rows(&mut s, "show parameters like 'QUERY_TAG'")[0][1], v(""));
+
+    let parameters = vec![("TIMEZONE".to_owned(), "Not/AZone".to_owned())];
+    let err = s.execute(&Request { sql: "select 1", parameters, ..Default::default() }).unwrap_err().error;
+    assert_eq!(err.code, "002043");
+    assert_eq!(
+        value(&mut s, "select '2024-01-01 12:00:00'::timestamp_tz::varchar"),
+        v("2024-01-01 12:00:00.000 +0000")
+    );
+
+    let engine = Engine::open(None).unwrap();
+    assert_eq!(engine.set_account_parameter("TIMEZONE", "Not/AZone").unwrap_err().code, "002043");
+    let options = SessionOptions { parameters: vec![("TIMEZONE".into(), "Not/AZone".into())], ..Default::default() };
+    assert!(engine.session(options).is_err());
+}

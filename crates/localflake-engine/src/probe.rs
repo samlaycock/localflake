@@ -35,7 +35,8 @@ pub fn site_types(conn: &duckdb::Connection, sql: &str) -> HashMap<u32, Vec<Stri
     PROBED.with(|p| std::mem::take(&mut *p.borrow_mut()))
 }
 
-/// Registers the probes on `db`: `sf_probe(INTEGER, ANY[, ANY]) -> DOUBLE` for
+/// Registers the probes on `db`: `sf_probe(INTEGER, ANY[, ANY ...]) -> DOUBLE` (up to
+/// `localflake_sql::MAX_PROBED` operands) for
 /// numeric sites and `sf_probe_text(INTEGER, ANY) -> VARCHAR` for text sites,
 /// so the probe SQL still binds where the site's value is used.
 ///
@@ -55,7 +56,7 @@ unsafe fn register_probe(db: ffi::duckdb_database, name: &CStr, return_type: ffi
             return Err("cannot connect to register the type probes".into());
         }
         let mut set = ffi::duckdb_create_scalar_function_set(name.as_ptr());
-        for arity in 1..=2 {
+        for arity in 1..=localflake_sql::MAX_PROBED {
             let mut f = ffi::duckdb_create_scalar_function();
             ffi::duckdb_scalar_function_set_name(f, name.as_ptr());
             add_parameter(f, ffi::DUCKDB_TYPE_DUCKDB_TYPE_INTEGER);
