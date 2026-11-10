@@ -914,3 +914,111 @@ fn invalid_timezones_fail_and_change_nothing() {
     let options = SessionOptions { parameters: vec![("TIMEZONE".into(), "Not/AZone".into())], ..Default::default() };
     assert!(engine.session(options).is_err());
 }
+
+/// Runs a statement with array binds: one row of binds per execution.
+fn array_bound(s: &mut Session, sql: &str, bindings: Vec<Vec<Bind>>) -> Result<Vec<Vec<Option<String>>>, EngineError> {
+    match s.execute(&Request { sql, bindings, ..Default::default() }) {
+        Ok(results) => Ok(results[0].json_rows().unwrap()),
+        Err(failure) => Err(failure.error),
+    }
+}
+
+#[test]
+fn array_binds_insert_every_row() {
+    let mut s = session();
+    let text = |s: &str| Bind::Text(s.into());
+    run(&mut s, "create table t (id int, name varchar, score float, d date)");
+    let people = vec![
+        vec![Bind::Int(1), text("a"), Bind::Float(0.5), text("2024-01-02")],
+        vec![Bind::Int(2), Bind::Null, Bind::Null, Bind::Null],
+        vec![Bind::Int(3), text("c"), Bind::Float(2.0), text("2024-03-04")],
+    ];
+    assert_eq!(array_bound(&mut s, "insert into t values (?, ?, ?, ?)", people).unwrap(), [[v("3")]]);
+    // Numbered binds, a column list and expressions around the binds.
+    let more = vec![vec![Bind::Int(4), text("d")], vec![Bind::Int(5), text("e")]];
+    assert_eq!(
+        array_bound(&mut s, "insert into t (name, id) values (upper(:2) || :1, :1 * 10)", more).unwrap(),
+        [[v("2")]]
+    );
+    assert_eq!(
+        rows(&mut s, "select id, name, score::varchar, d::varchar from t order by id"),
+        [
+            [v("1"), v("a"), v("0.5"), v("2024-01-02")],
+            [v("2"), None, None, None],
+            [v("3"), v("c"), v("2"), v("2024-03-04")],
+            [v("40"), v("D4"), None, None],
+            [v("50"), v("E5"), None, None],
+        ]
+    );
+    // Other statements run once per row of binds.
+    let renames = vec![vec![text("x"), Bind::Int(1)], vec![text("y"), Bind::Int(3)]];
+    assert_eq!(array_bound(&mut s, "update t set name = ? where id = ?", renames).unwrap(), [[v("2"), v("0")]]);
+    assert_eq!(value(&mut s, "select listagg(name, ',') within group (order by id) from t where id < 4"), v("x,y"));
+}
+
+#[test]
+fn array_binds_span_several_inserts() {
+    let mut s = session();
+    run(&mut s, "create table t (a int, b varchar)");
+    // More binds than one insert takes, so a second, shorter insert follows.
+    let count = ARRAY_BIND_PLACEHOLDERS / 2 + 100;
+    let numbers = |from: usize| (from..from + count).map(|i| vec![Bind::Int(i as i64), Bind::Text(format!("n{i}"))]);
+    assert_eq!(
+        array_bound(&mut s, "insert into t values (?, ?)", numbers(0).collect()).unwrap(),
+        [[v(&count.to_string())]]
+    );
+    let total = (count * (count - 1) / 2).to_string();
+    assert_eq!(
+        rows(&mut s, "select count(*), sum(a), count(distinct b), max(a) from t where b = 'n' || a"),
+        [[v(&count.to_string()), v(&total), v(&count.to_string()), v(&(count - 1).to_string())]]
+    );
+
+    // A row that fails in a later insert leaves none of the statement's rows.
+    let mut failing: Vec<Vec<Bind>> = numbers(count).collect();
+    failing[count - 1][0] = Bind::Text("not a number".into());
+    array_bound(&mut s, "insert into t values (?, ?)", failing.clone()).unwrap_err();
+    assert_eq!(value(&mut s, "select count(*) from t"), v(&count.to_string()));
+
+    // In a transaction, its earlier statements stay and it can still commit.
+    run(&mut s, "begin");
+    run(&mut s, "insert into t values (-1, 'kept')");
+    array_bound(&mut s, "insert into t values (?, ?)", failing.clone()).unwrap_err();
+    // A bind of the wrong type fails as DuckDB prepares the insert, rather than as it runs.
+    failing[count - 1][0] = Bind::Date(1);
+    array_bound(&mut s, "insert into t values (?, ?)", failing).unwrap_err();
+    assert_eq!(value(&mut s, "select count(*) from t"), v(&(count + 1).to_string()));
+    run(&mut s, "commit");
+    assert_eq!(value(&mut s, "select count(*), min(a) from t group by all"), v(&(count + 1).to_string()));
+}
+
+#[test]
+fn flatten_reads_a_large_bound_document() {
+    let mut s = session();
+    run(&mut s, "create table t (a varchar, n int)");
+    let elements: Vec<String> =
+        (0..2000).map(|i| format!(r#"{{"A":"name-{i}","N":{i},"PAD":"{}"}}"#, "x".repeat(64))).collect();
+    let document = || Bind::Text(format!("[{}]", elements.join(",")));
+    let insert = "insert into t select value:A::varchar, value:N::int from table(flatten(input => parse_json(?)))";
+    assert_eq!(bound(&mut s, insert, vec![document()]), [[v("2000")]]);
+    assert_eq!(
+        rows(&mut s, "select count(*), sum(n), count(distinct a) from t where a = 'name-' || n"),
+        [[v("2000"), v("1999000"), v("2000")]]
+    );
+    // Every row still has its index and, when asked for, the whole input.
+    let last = "select index, value:N::int, array_size(this) from table(flatten(input => parse_json(?))) \
+                where index >= 1998 order by index";
+    assert_eq!(
+        bound(&mut s, last, vec![document()]),
+        [[v("1998"), v("1998"), v("2000")], [v("1999"), v("1999"), v("2000")]]
+    );
+    // Type-directed sites (the division's scale) are still typed beside a bind too long for the probe.
+    let typed = "select count(*), 10 / 4 from table(flatten(input => parse_json(?)))";
+    assert_eq!(bound(&mut s, typed, vec![document()]), [[v("2000"), v("2.500000")]]);
+    let objects =
+        "select key, value::int, this:b::int from table(flatten(input => parse_json(?), outer => true)) order by key";
+    assert_eq!(
+        bound(&mut s, objects, vec![Bind::Text(r#"{"b": 2, "a": 1}"#.into())]),
+        [[v("a"), v("1"), v("2")], [v("b"), v("2"), v("2")]]
+    );
+    assert_eq!(bound(&mut s, objects, vec![Bind::Text("[]".into())]), [[None, None, None]]);
+}

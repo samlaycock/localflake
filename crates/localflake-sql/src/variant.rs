@@ -128,13 +128,15 @@ pub fn flatten(args: FlattenArgs, alias: Option<TableAlias>) -> Result<TableFact
     if args.recursive {
         return recursive_flatten(&this, &prefix, &args.mode, args.outer, alias);
     }
-    let empty = "CAST([] AS STRUCT(k VARCHAR, i BIGINT, v VARIANT, t VARIANT)[])";
+    // The input is only evaluated outside the lambdas: inside one it would be
+    // evaluated again for every element, and a copy of it carried on every row.
+    let empty = "CAST([] AS STRUCT(k VARCHAR, i BIGINT, v VARIANT)[])";
     let arrays = if args.mode == "OBJECT" {
         empty.to_owned()
     } else {
         format!(
-            "list_transform(range(len(CAST({this} AS VARIANT[]))), \
-             lambda __i: {{'k': CAST(NULL AS VARCHAR), 'i': __i, 'v': CAST({this} AS VARIANT[])[__i + 1], 't': {this}}})"
+            "list_transform(CAST({this} AS VARIANT[]), \
+             lambda __v, __i: {{'k': CAST(NULL AS VARCHAR), 'i': CAST(__i - 1 AS BIGINT), 'v': __v}})"
         )
     };
     let objects = if args.mode == "ARRAY" {
@@ -142,7 +144,7 @@ pub fn flatten(args: FlattenArgs, alias: Option<TableAlias>) -> Result<TableFact
     } else {
         format!(
             "list_transform(map_entries(CAST(CAST({this} AS JSON) AS MAP(VARCHAR, JSON))), \
-             lambda __m: {{'k': __m.key, 'i': CAST(NULL AS BIGINT), 'v': CAST(__m.value AS VARIANT), 't': {this}}})"
+             lambda __m: {{'k': __m.key, 'i': CAST(NULL AS BIGINT), 'v': CAST(__m.value AS VARIANT)}})"
         )
     };
     let items = format!(
@@ -153,17 +155,18 @@ pub fn flatten(args: FlattenArgs, alias: Option<TableAlias>) -> Result<TableFact
     let items = if args.outer {
         format!(
             "CASE WHEN len({items}) = 0 THEN [{{'k': CAST(NULL AS VARCHAR), 'i': CAST(NULL AS BIGINT), \
-             'v': CAST(NULL AS VARIANT), 't': {this}}}] ELSE {items} END"
+             'v': CAST(NULL AS VARIANT)}}] ELSE {items} END"
         )
     } else {
         items
     };
     // A lone unnest in the lateral subquery keeps element order; extra
-    // subquery layers would be decorrelated into joins that don't.
+    // subquery layers would be decorrelated into joins that don't. THIS is
+    // the input again, which DuckDB only evaluates when the query reads it.
     let sql = format!(
         "SELECT CAST(1 AS BIGINT) AS \"SEQ\", __e.k AS \"KEY\", \
          CASE WHEN __e.k IS NOT NULL THEN {prefix} || {dot} || __e.k WHEN __e.i IS NOT NULL THEN {prefix} || '[' || __e.i || ']' END AS \"PATH\", \
-         __e.i AS \"INDEX\", __e.v AS \"VALUE\", __e.t AS \"THIS\" \
+         __e.i AS \"INDEX\", __e.v AS \"VALUE\", {this} AS \"THIS\" \
          FROM (SELECT unnest({items}) AS __e) AS __flatten"
     );
     derived(&sql, alias, true)

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
@@ -21,6 +22,8 @@ use crate::protocol::{
 
 /// Snowflake's "session no longer exists, new login required" code.
 const SESSION_GONE: &str = "390111";
+/// The code for a request over `--max-request-bytes` (Snowflake has no such limit to take one from).
+const REQUEST_TOO_LARGE: &str = "000413";
 const SERVER_VERSION: &str = concat!("localflake-", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone)]
@@ -165,7 +168,8 @@ impl ClientSession {
     }
 }
 
-pub fn router(engine: Engine, forced_format: Option<ResultFormat>, web_ui: bool) -> Router {
+/// `max_request_bytes` limits request bodies other than file transfers (0: no limit).
+pub fn router(engine: Engine, forced_format: Option<ResultFormat>, web_ui: bool, max_request_bytes: usize) -> Router {
     let state = AppState {
         engine,
         sessions: Default::default(),
@@ -196,7 +200,12 @@ pub fn router(engine: Engine, forced_format: Option<ResultFormat>, web_ui: bool)
         )
         .fallback(unknown);
     let router = if web_ui { router.merge(crate::ui::router()) } else { router };
-    router.with_state(state)
+    // The routes that transfer files turn the limit off with a layer of their own.
+    let limit = match max_request_bytes {
+        0 => DefaultBodyLimit::disable(),
+        bytes => DefaultBodyLimit::max(bytes),
+    };
+    router.layer(limit).with_state(state)
 }
 
 async fn login(State(state): State<AppState>, Query(params): Query<LoginParams>, body: Bytes) -> Response {
@@ -291,8 +300,19 @@ async fn query(
     State(state): State<AppState>,
     Query(params): Query<RequestParams>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        // As a query error, which drivers report with its message; they
+        // report an HTTP error without the reason.
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            let message = "The statement and its binds are larger than localflake's request limit. \
+                           Raise it with --max-request-bytes or LOCALFLAKE_MAX_REQUEST_BYTES (0 for no limit).";
+            return Json(Envelope::error(REQUEST_TOO_LARGE, message, Value::Null)).into_response();
+        }
+        Err(rejection) => return rejection.into_response(),
+    };
     let Some(entry) = client_for(&state, &headers) else { return session_gone() };
     let request: QueryRequest = match decode(&body) {
         Ok(r) => r,

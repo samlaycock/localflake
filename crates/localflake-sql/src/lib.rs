@@ -34,7 +34,7 @@ pub use meta::{Scope, Show};
 pub use normalize::{CASE_MARKER, decode_identifier, encode_identifier, normalize_identifiers};
 pub use rewrite::result_table;
 pub use translate::{
-    Command, InsertParts, SqlCommand, StatementKind, UseTarget, split, split_original, statement_ranges,
+    Command, InsertParts, RowInsert, SqlCommand, StatementKind, UseTarget, split, split_original, statement_ranges,
     translate_statement,
 };
 pub use typing::{MAX_PROBED, SiteTypes};
