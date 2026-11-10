@@ -58,6 +58,8 @@ Driver APIs that SQL can't express are tested in each suite's own files
 | Bind styles | qmark, numeric and pyformat (`test_qmark_and_numeric_binds`, `test_pyformat_binds`) | `?` and `:n` (spec) | `?` and `:n` (spec) |
 | Typed date/time binds | spec (`datetime`, `(type, value)` tuples) | spec (`Date`) | spec (type markers) |
 | Array binding | `test_executemany_array_binds` | `array binds` | spec (`sf.Array`) |
+| Bulk inserts | none (`executemany` sends a request per row) | `bulk inserts` (array binds, a placeholder per value, one JSON bind through `FLATTEN`) | `TestBulkInserts` (`sf.Array`) |
+| Request size | `test_requests_over_two_megabytes`, `test_max_request_bytes` | `bulk inserts` (a bind over 2 MB) | none |
 | Streaming large results | `test_large_result` | `large result streams` | `TestLargeResult` |
 | Transaction API | `test_transactions` (`commit`, `rollback`, `autocommit`) | none (SQL only) | `TestTransactionAPI` (`BeginTx`) |
 | Query IDs | spec (`sfqid`) | spec (`getQueryId`) | `TestQueryID` (`WithQueryIDChan`) |

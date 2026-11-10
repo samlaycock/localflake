@@ -36,6 +36,11 @@ struct Args {
     #[arg(long, env = "LOCALFLAKE_TIMEZONE")]
     timezone: Option<String>,
 
+    /// The largest request accepted, in bytes: a statement with its binds.
+    /// 0 for no limit. PUT and GET transfer files of any size.
+    #[arg(long, env = "LOCALFLAKE_MAX_REQUEST_BYTES", default_value_t = 256 * 1024 * 1024)]
+    max_request_bytes: usize,
+
     /// Serve the web UI (a SQL worksheet, object explorer and query history)
     /// at `/__localflake/ui/`.
     #[arg(long, env = "LOCALFLAKE_UI", default_value_t = true, action = clap::ArgAction::Set)]
@@ -71,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
         "arrow" => Some(protocol::ResultFormat::Arrow),
         _ => None,
     };
-    axum::serve(listener, routes::router(engine, forced_format, args.ui))
+    axum::serve(listener, routes::router(engine, forced_format, args.ui, args.max_request_bytes))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

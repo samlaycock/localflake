@@ -103,6 +103,12 @@ fn embedded_icu() -> std::io::Result<Option<PathBuf>> {
 /// Results kept for `RESULT_SCAN`, async queries and multi-statement requests.
 const STORED_RESULTS: usize = 500;
 
+/// The longest text bind the type probe reads in full (see `probe_placeholders`).
+const PROBE_LITERAL_BYTES: usize = 4096;
+
+/// The placeholders in each multi-row insert that array binds run as (see `Session::run_array_insert`).
+const ARRAY_BIND_PLACEHOLDERS: usize = 8192;
+
 pub type StoredResult = Result<Arc<QueryResult>, EngineError>;
 
 #[derive(Clone)]
@@ -227,6 +233,9 @@ fn typed_placeholders(sql: &str, binds: &[Bind]) -> String {
 /// Text binds become string literals instead: like an untyped parameter, a
 /// literal takes its type from its context, whereas a VARCHAR can't be
 /// range-compared with a date or time (`d >= ?`), which fails the probe.
+/// Text over `PROBE_LITERAL_BYTES` (a document, say) goes as an empty literal:
+/// its content doesn't change a type, and DuckDB would parse and constant-fold
+/// all of it in every round of the probe.
 fn probe_placeholders(sql: &str, binds: &[Bind]) -> String {
     if binds.is_empty() {
         return sql.to_owned();
@@ -235,6 +244,7 @@ fn probe_placeholders(sql: &str, binds: &[Bind]) -> String {
         let bind = binds.get(n.wrapping_sub(1))?;
         let type_name = match bind {
             Bind::Null => return Some("NULL".to_owned()),
+            Bind::Text(s) if s.len() > PROBE_LITERAL_BYTES => return Some("''".to_owned()),
             Bind::Text(s) => return Some(format!("'{}'", s.replace('\'', "''"))),
             Bind::Bool(_) => "BOOLEAN",
             Bind::Int(_) | Bind::TimestampLtz(_) | Bind::TimestampTz { .. } => "BIGINT",
@@ -395,6 +405,7 @@ impl Engine {
             ctx,
             in_transaction: false,
             transaction_failed: false,
+            transaction_partial: false,
             transaction_log: vec![],
             temporary_files: vec![],
             load_tables: 0,
@@ -497,6 +508,9 @@ pub struct Session {
     in_transaction: bool,
     /// A statement failed and DuckDB aborted the open transaction, so it must not report a successful COMMIT.
     transaction_failed: bool,
+    /// A statement failed after changing data in the open transaction, which
+    /// `recover_transaction` must undo even though DuckDB didn't abort it.
+    transaction_partial: bool,
     /// The open transaction's successful data changes, replayed into a fresh
     /// transaction when DuckDB aborts it (see `recover_transaction`).
     transaction_log: Vec<(String, Vec<Vec<Bind>>)>,
@@ -732,9 +746,11 @@ impl Session {
     /// Snowflake keeps a transaction open when one of its statements fails, but
     /// DuckDB aborts it. Roll back, open a fresh transaction and replay the
     /// transaction's earlier changes, so the transaction carries on as in
-    /// Snowflake. If a replay fails, the next COMMIT fails instead.
+    /// Snowflake. If a replay fails, the next COMMIT fails instead. The same
+    /// undoes a statement that failed part-way (see `transaction_partial`).
     fn recover_transaction(&mut self) {
-        if !self.in_transaction || self.conn.execute_batch("SELECT 1").is_ok() {
+        let partial = std::mem::take(&mut self.transaction_partial);
+        if !self.in_transaction || (!partial && self.conn.execute_batch("SELECT 1").is_ok()) {
             return;
         }
         if self.conn.execute_batch("ROLLBACK; BEGIN TRANSACTION").is_err() {
@@ -748,6 +764,7 @@ impl Session {
                 Err(err) => {
                     tracing::warn!(%err, %sql, "replaying the aborted transaction failed");
                     self.transaction_failed = true;
+                    self.transaction_partial = false;
                     let _ = self.conn.execute_batch("ROLLBACK; BEGIN TRANSACTION");
                     self.transaction_log.clear();
                     return;
@@ -809,9 +826,79 @@ impl Session {
         self.sync_timezone()?;
         // TIMESTAMP_TZ casts read the time zone of the statement being executed.
         let _zone = tz::enter(self.ctx.parameter("TIMEZONE").unwrap_or("UTC"));
-        let result = self.run_translated(sql, query_id, bindings, describe_only);
+        let rows = bindings.first().map_or(0, Vec::len);
+        let insert = match bindings.len() > 1 && !describe_only && bindings.iter().all(|row| row.len() == rows) {
+            true => localflake_sql::RowInsert::parse(sql, rows),
+            false => None,
+        };
+        let result = match insert {
+            Some(insert) => self.run_array_insert(&insert, query_id, bindings),
+            None => self.run_translated(sql, query_id, bindings, describe_only),
+        };
         self.drop_load_tables();
         result
+    }
+
+    /// Runs a single-row `INSERT ... VALUES` with array binds as multi-row
+    /// inserts of up to `ARRAY_BIND_PLACEHOLDERS` binds each, rather than once
+    /// per row of binds. They share a transaction, so the statement inserts
+    /// all of its rows or none.
+    fn run_array_insert(
+        &mut self,
+        insert: &localflake_sql::RowInsert,
+        query_id: &str,
+        bindings: &[Vec<Bind>],
+    ) -> Result<QueryResult, EngineError> {
+        if !self.in_transaction && !self.autocommit() {
+            self.begin_transaction()?;
+        }
+        let own_transaction = !self.in_transaction;
+        if own_transaction {
+            self.conn.execute_batch("BEGIN TRANSACTION")?;
+        }
+        let batch = (ARRAY_BIND_PLACEHOLDERS / bindings[0].len()).clamp(1, bindings.len());
+        let full = insert.sql(batch);
+        let mut total = 0;
+        let mut outcome = Ok(());
+        for rows in bindings.chunks(batch) {
+            let last;
+            let sql = match rows.len() == batch {
+                true => &full,
+                false => {
+                    last = insert.sql(rows.len());
+                    &last
+                }
+            };
+            let binds: Vec<Bind> = rows.iter().flatten().cloned().collect();
+            match self.run_translated(sql, query_id, &[binds], false) {
+                Ok(result) => total += rows_affected(&result),
+                Err(error) => {
+                    outcome = Err(error);
+                    break;
+                }
+            }
+        }
+        match (&outcome, own_transaction) {
+            (Ok(()), true) => self.end_own_transaction("COMMIT")?,
+            (Err(_), true) => self.end_own_transaction("ROLLBACK")?,
+            // The session's transaction keeps the rows of the earlier inserts until it is recovered.
+            (Err(_), false) => self.transaction_partial = total > 0,
+            (Ok(()), false) => {}
+        }
+        outcome?;
+        let kind = StatementKind::Insert;
+        Ok(QueryResult::row_counts(query_id.to_owned(), &dml_counts(kind, total as i64), kind))
+    }
+
+    /// Ends a DuckDB transaction that a statement opened for itself with `sql`
+    /// (`COMMIT` or `ROLLBACK`). When that fails, say by taking a pending
+    /// interrupt, DuckDB can leave the transaction open but aborted.
+    fn end_own_transaction(&self, sql: &str) -> Result<(), EngineError> {
+        let ended = self.conn.execute_batch(sql);
+        if ended.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        Ok(ended?)
     }
 
     fn run_translated(

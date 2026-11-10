@@ -106,6 +106,40 @@ test("array binds", async () => {
   assert.equal(result[0].C, 20);
 });
 
+test("bulk inserts", async () => {
+  const conn = await connect("NODE_BULK");
+  await exec(conn, "create table t (id int, name varchar, d date)");
+  const row = (i) => [i, `n${i}`, "2024-03-05"];
+  // Array binds: one row of binds per row.
+  const arrayBound = await exec(conn, "insert into t values (?, ?, ?)", Array.from({ length: 5000 }, (_, i) => row(i)));
+  assert.equal(arrayBound.stmt.getNumUpdatedRows(), 5000);
+  // One statement with a placeholder per value.
+  const tuples = Array.from({ length: 1000 }, () => "(?, ?, ?)").join(", ");
+  const values = Array.from({ length: 1000 }, (_, i) => row(5000 + i)).flat();
+  const multiRow = await exec(conn, `insert into t select column1::int, column2, column3::date from values ${tuples}`, values);
+  assert.equal(multiRow.stmt.getNumUpdatedRows(), 1000);
+  // One bind holding every row as JSON, over the 2 MB that request bodies were once limited to.
+  const documents = Array.from({ length: 4000 }, (_, i) => ({ ID: 6000 + i, NAME: `n${6000 + i}`, D: "2024-03-05", PAD: "x".repeat(600) }));
+  const json = JSON.stringify(documents);
+  assert.ok(json.length > 2 * 1024 * 1024);
+  const flattened = await exec(
+    conn,
+    "insert into t select value:ID::int, value:NAME::varchar, value:D::varchar::date from table(flatten(input => parse_json(?)))",
+    [json],
+  );
+  assert.equal(flattened.stmt.getNumUpdatedRows(), 4000);
+  const { rows } = await exec(
+    conn,
+    "select count(*) as c, count(distinct id) as ids, sum(iff(name = 'n' || id and d = '2024-03-05', 1, 0)) as ok from t",
+  );
+  assert.deepEqual(rows, [{ C: 10000, IDS: 10000, OK: 10000 }]);
+  // A failing row leaves none of an array bind's rows behind.
+  const failing = Array.from({ length: 5000 }, (_, i) => [i === 4999 ? "not a number" : String(i), "x", "2024-03-05"]);
+  await assert.rejects(exec(conn, "insert into t values (?, ?, ?)", failing));
+  const { rows: after } = await exec(conn, "select count(*) as c from t");
+  assert.equal(after[0].C, 10000);
+});
+
 test("errors carry Snowflake codes", async () => {
   const conn = await connect();
   await assert.rejects(exec(conn, "select * from missing_table"), (err) => {

@@ -133,6 +133,52 @@ func TestDMLAndBinds(t *testing.T) {
 	}
 }
 
+func TestBulkInserts(t *testing.T) {
+	db := open(t, "GO_BULK")
+	if _, err := db.Exec("create table t (id int, name varchar)"); err != nil {
+		t.Fatal(err)
+	}
+	const count = 5000
+	ids := make([]string, count)
+	names := make([]string, count)
+	for i := range ids {
+		ids[i] = fmt.Sprint(i)
+		names[i] = fmt.Sprintf("n%d", i)
+	}
+	arrays := func() []any {
+		idArray, err := sf.Array(&ids)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nameArray, err := sf.Array(&names)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []any{idArray, nameArray}
+	}
+	// Array binds: one row of binds per row.
+	res, err := db.Exec("insert into t values (?, ?)", arrays()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := res.RowsAffected(); n != count {
+		t.Fatalf("rows affected: %d", n)
+	}
+	var total, matching int
+	query := "select count(*), sum(iff(name = 'n' || id, 1, 0)) from t"
+	if err := db.QueryRow(query).Scan(&total, &matching); err != nil || total != count || matching != count {
+		t.Fatalf("%v: %d rows, %d matching", err, total, matching)
+	}
+	// A failing row leaves none of the statement's rows behind.
+	ids[count-1] = "not a number"
+	if _, err := db.Exec("insert into t values (?, ?)", arrays()...); err == nil {
+		t.Fatal("expected the insert to fail")
+	}
+	if err := db.QueryRow("select count(*) from t").Scan(&total); err != nil || total != count {
+		t.Fatalf("%v: %d rows", err, total)
+	}
+}
+
 func TestErrors(t *testing.T) {
 	db := open(t, "GO_ERR")
 	_, err := db.Query("select * from missing_table")

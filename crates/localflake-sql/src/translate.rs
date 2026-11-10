@@ -151,6 +151,138 @@ impl InsertParts {
     }
 }
 
+/// A single-row `INSERT INTO t [(columns)] VALUES (...)` whose row can be
+/// repeated. Array binds (one row of binds per row to insert) then run as
+/// multi-row inserts rather than one statement per row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowInsert {
+    /// The statement up to the row.
+    head: String,
+    /// The row's text around its binds: one more than `binds`.
+    text: Vec<String>,
+    /// The bind (from 0) of each placeholder in the row.
+    binds: Vec<usize>,
+    width: usize,
+}
+
+impl RowInsert {
+    /// `None` unless `sql` is such an insert, with a row reading `width`
+    /// binds through `?` or `:n` placeholders.
+    pub fn parse(sql: &str, width: usize) -> Option<Self> {
+        let tokens = crate::scripting::tokens_with_offsets(sql).ok()?;
+        let mut tokens = tokens.as_slice();
+        while let [rest @ .., (Token::SemiColon, ..)] = tokens {
+            tokens = rest;
+        }
+        let word = |i: usize, expected: &str| matches!(tokens.get(i), Some((Token::Word(w), ..)) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(expected));
+        let is = |i: usize, expected: &Token| tokens.get(i).is_some_and(|(token, ..)| token == expected);
+        // The index after the parenthesis matching the one at `open`.
+        let close = |open: usize| {
+            let mut depth = 0usize;
+            for (i, (token, ..)) in tokens.iter().enumerate().skip(open) {
+                match token {
+                    Token::LParen => depth += 1,
+                    Token::RParen if depth == 1 => return Some(i + 1),
+                    Token::RParen => depth -= 1,
+                    _ => {}
+                }
+            }
+            None
+        };
+        if !word(0, "INSERT") || !word(1, "INTO") {
+            return None;
+        }
+        // The table's name, then its column list.
+        let mut at = 2;
+        loop {
+            if !matches!(tokens.get(at), Some((Token::Word(_), ..))) {
+                return None;
+            }
+            at += 1;
+            if !is(at, &Token::Period) {
+                break;
+            }
+            at += 1;
+        }
+        if is(at, &Token::LParen) {
+            at = close(at)?;
+        }
+        if !word(at, "VALUES") || !is(at + 1, &Token::LParen) || close(at + 1)? != tokens.len() {
+            return None;
+        }
+        let row = at + 1;
+        let bound = |tokens: &[(Token, usize, usize)]| {
+            tokens.iter().any(|(token, ..)| matches!(token, Token::Placeholder(_) | Token::Colon))
+        };
+        if bound(&tokens[..row]) {
+            return None;
+        }
+
+        let mut text = vec![];
+        let mut binds = vec![];
+        let (mut positional, mut numbered) = (0, false);
+        let mut copied = tokens[row].1;
+        let mut i = row;
+        while i < tokens.len() {
+            let (token, start, end) = &tokens[i];
+            let (bind, end) = match token {
+                Token::Placeholder(p) if p == "?" => {
+                    positional += 1;
+                    (positional - 1, *end)
+                }
+                Token::Placeholder(_) => return None,
+                // `:n`, as opposed to the path of `v:a`.
+                Token::Colon => match tokens.get(i + 1) {
+                    Some((Token::Number(n, false), next, number_end)) if next == end => {
+                        numbered = true;
+                        i += 1;
+                        (n.parse::<usize>().ok()?.checked_sub(1)?, *number_end)
+                    }
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                },
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            text.push(sql[copied..*start].to_owned());
+            binds.push(bind);
+            copied = end;
+            i += 1;
+        }
+        text.push(sql[copied..tokens[tokens.len() - 1].2].to_owned());
+        let complete = match numbered {
+            true => positional == 0 && binds.iter().all(|bind| *bind < width),
+            false => positional == width,
+        };
+        (width > 0 && complete).then(|| Self { head: sql[..tokens[row].1].to_owned(), text, binds, width })
+    }
+
+    /// The insert with `rows` rows, where row `r` (from 0) reads binds
+    /// `r * width + 1` onwards as `:n` placeholders.
+    pub fn sql(&self, rows: usize) -> String {
+        let row: usize = self.text.iter().map(String::len).sum::<usize>() + self.binds.len() * 8 + 2;
+        let mut sql = String::with_capacity(self.head.len() + rows * row);
+        sql.push_str(&self.head);
+        for r in 0..rows {
+            if r > 0 {
+                sql.push_str(", ");
+            }
+            for (i, text) in self.text.iter().enumerate() {
+                sql.push_str(text);
+                if let Some(bind) = self.binds.get(i) {
+                    sql.push(':');
+                    sql.push_str(&(r * self.width + bind + 1).to_string());
+                }
+            }
+        }
+        sql
+    }
+}
+
 impl SqlCommand {
     pub(crate) fn new(sql: impl Into<String>, kind: StatementKind) -> Self {
         Self {
@@ -1150,6 +1282,52 @@ mod tests {
         match command(statement) {
             Command::Sql(c) => c.sql,
             other => panic!("expected SQL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn row_insert_repeats_the_row() {
+        let repeat = |sql: &str, width, rows| RowInsert::parse(sql, width).map(|insert| insert.sql(rows));
+        assert_eq!(
+            repeat("INSERT INTO T VALUES (?, ?)", 2, 3).unwrap(),
+            "INSERT INTO T VALUES (:1, :2), (:3, :4), (:5, :6)"
+        );
+        // A column list, expressions around the binds, and text that only looks like a bind.
+        assert_eq!(
+            repeat("INSERT INTO DB.S.T (A, B, C) VALUES (UPPER(?), '?', PARSE_JSON(?):k::INT);", 2, 2).unwrap(),
+            "INSERT INTO DB.S.T (A, B, C) VALUES (UPPER(:1), '?', PARSE_JSON(:2):k::INT), \
+             (UPPER(:3), '?', PARSE_JSON(:4):k::INT)"
+        );
+        // Numbered binds, in any order and more than once.
+        assert_eq!(
+            repeat("INSERT INTO T VALUES (:2, :1, :2)", 2, 2).unwrap(),
+            "INSERT INTO T VALUES (:2, :1, :2), (:4, :3, :4)"
+        );
+        for (sql, width) in [
+            ("INSERT INTO T VALUES (?, ?)", 3),
+            ("INSERT INTO T VALUES (?, :1)", 2),
+            ("INSERT INTO T VALUES (:1, :3)", 2),
+            ("INSERT INTO T VALUES (?), (?)", 2),
+            ("INSERT INTO T VALUES (1)", 0),
+            ("INSERT INTO T SELECT ?", 1),
+            ("INSERT INTO T SELECT COLUMN1 FROM VALUES (?)", 1),
+            ("INSERT INTO T (A) SELECT * FROM (VALUES (?))", 1),
+            ("INSERT OVERWRITE INTO T VALUES (?)", 1),
+            ("INSERT ALL INTO T VALUES (?) SELECT 1", 1),
+            ("INSERT INTO IDENTIFIER(?) VALUES (?)", 2),
+            ("UPDATE T SET A = ?", 1),
+        ] {
+            assert_eq!(RowInsert::parse(sql, width), None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn flatten_evaluates_its_input_outside_lambdas() {
+        let sql = sql("select value from table(flatten(input => parse_json(?)))");
+        assert!(sql.contains("$1"), "{sql}");
+        for lambda in sql.split("lambda ").skip(1) {
+            let body = &lambda[..lambda.find("})").expect("a struct-building lambda")];
+            assert!(!body.contains("$1"), "the input would be evaluated per element: {body}");
         }
     }
 

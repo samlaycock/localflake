@@ -114,25 +114,79 @@ pub fn decode_identifier(name: &str) -> String {
 }
 
 /// Maps the tokenizer's 1-based (line, column-in-chars) locations to byte offsets.
-pub(crate) struct LineOffsets(Vec<usize>);
+///
+/// A lookup costs the same wherever it is in the line, so mapping every token
+/// of a statement stays linear in its length (bulk inserts are one long line).
+pub(crate) struct LineOffsets(Vec<Line>);
+
+struct Line {
+    start: usize,
+    /// The byte offset of every `STRIDE`th character of a line with multi-byte
+    /// characters. Empty for an ASCII line, where columns are bytes.
+    marks: Vec<usize>,
+}
+
+/// Characters between the marks of a line with multi-byte characters.
+const STRIDE: usize = 64;
 
 impl LineOffsets {
     pub(crate) fn new(sql: &str) -> Self {
-        let mut starts = vec![0];
-        starts.extend(sql.match_indices('\n').map(|(i, _)| i + 1));
-        Self(starts)
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for line in sql.split_inclusive('\n') {
+            let marks = match line.is_ascii() {
+                true => vec![],
+                false => line.char_indices().step_by(STRIDE).map(|(i, _)| start + i).collect(),
+            };
+            lines.push(Line { start, marks });
+            start += line.len();
+        }
+        // The line after a trailing newline, or the only line of empty text.
+        lines.push(Line { start, marks: vec![] });
+        Self(lines)
     }
 
     pub(crate) fn byte_offset(&self, sql: &str, line: u64, column: u64) -> usize {
-        let line_start = self.0[(line - 1) as usize];
-        sql[line_start..].char_indices().nth((column - 1) as usize).map_or(sql.len(), |(i, _)| line_start + i)
+        let index = (line - 1) as usize;
+        let line = &self.0[index];
+        let column = (column - 1) as usize;
+        let (from, skip) = match line.marks.len() {
+            0 => {
+                let end = self.0.get(index + 1).map_or(sql.len(), |next| next.start);
+                if line.start + column < end {
+                    return line.start + column;
+                }
+                (line.start, column)
+            }
+            marks => {
+                let mark = (column / STRIDE).min(marks - 1);
+                (line.marks[mark], column - mark * STRIDE)
+            }
+        };
+        sql[from..].char_indices().nth(skip).map_or(sql.len(), |(i, _)| from + i)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::normalize_identifiers as n;
-    use super::{decode_identifier, encode_identifier};
+    use super::{LineOffsets, STRIDE, decode_identifier, encode_identifier};
+
+    #[test]
+    fn line_offsets_map_columns_to_bytes() {
+        let wide = "é".repeat(STRIDE * 2 + 3);
+        let sql = format!("select 1\n'{wide}' x, 'ß' y\n\nfrom t");
+        let offsets = LineOffsets::new(&sql);
+        // Every character's (line, column), and the position after each line's last one.
+        let (mut line, mut column) = (1, 1);
+        for (byte, c) in sql.char_indices() {
+            assert_eq!(offsets.byte_offset(&sql, line, column), byte, "{line}:{column}");
+            (line, column) = if c == '\n' { (line + 1, 1) } else { (line, column + 1) };
+        }
+        assert_eq!(offsets.byte_offset(&sql, line, column), sql.len());
+        assert_eq!(LineOffsets::new("").byte_offset("", 1, 1), 0);
+        assert_eq!(LineOffsets::new("a\n").byte_offset("a\n", 2, 1), 2);
+    }
 
     #[test]
     fn uppercases_unquoted_identifiers() {

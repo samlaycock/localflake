@@ -200,7 +200,9 @@ Run with `--ui false` to turn the web UI off.
   `--result-format json|arrow`. DML, DDL and `SHOW` results are always JSON,
   as with Snowflake
 - Bind variables (qmark `?`, numeric `:1`) including array binds for
-  `executemany`, with DML row counts in both `rowset` and `stats`
+  `executemany`, with DML row counts in both `rowset` and `stats`. An array-bound
+  `INSERT ... VALUES` runs as multi-row inserts in one transaction, so it
+  inserts all of its rows or none
 - Multi-statement requests (`MULTI_STATEMENT_COUNT` / `num_statements`) with
   per-statement child results
 - Async queries (`asyncExec`, `/monitoring/queries/{id}`, `/queries/{id}/result`)
@@ -440,6 +442,7 @@ list.
 | `--result-format` | `LOCALFLAKE_RESULT_FORMAT` | `auto` | `auto` uses Arrow for drivers that request it from Snowflake, `json` or `arrow` forces one |
 | `--missing-database` | `LOCALFLAKE_MISSING_DATABASE` | `create` | Logging in with an unknown database creates it, or `ignore` logs in without a current database, as Snowflake does |
 | `--timezone` | `LOCALFLAKE_TIMEZONE` | `America/Los_Angeles` | The account's `TIMEZONE` (an IANA name such as `UTC`); see [Time zones](#time-zones) |
+| `--max-request-bytes` | `LOCALFLAKE_MAX_REQUEST_BYTES` | `268435456` (256 MiB) | The largest request accepted: a statement with its binds. `0` for no limit. `PUT` and `GET` transfer files of any size |
 | `--ui` | `LOCALFLAKE_UI` | `true` | Serve the [web UI](#web-ui) at `/__localflake/ui/` (and redirect `/` to it) |
 
 Logging uses `RUST_LOG`. For example, `RUST_LOG=localflake_engine=debug` logs

@@ -9,6 +9,8 @@ import pytest
 from snowflake.connector import DictCursor
 from snowflake.connector.errors import ProgrammingError
 
+from conftest import connector, start_server, stop_server
+
 
 def test_arrow_types_round_trip(connect):
     cur = connect(database="TYPES_DB").cursor()
@@ -66,6 +68,29 @@ def test_executemany_array_binds(connect):
     cur.executemany("insert into t values (?, ?)", [(i, f"n{i}") for i in range(50)])
     assert cur.rowcount == 50
     assert cur.execute("select count(*), max(name) from t").fetchone() == (50, "n9")
+
+
+def test_requests_over_two_megabytes(connect):
+    cur = connect(paramstyle="qmark").cursor()
+    text = "x" * (3 * 1024 * 1024)
+    assert cur.execute("select length(?)", (text,)).fetchone() == (len(text),)
+    assert cur.execute(f"select length('{text}')").fetchone() == (len(text),)
+
+
+def test_max_request_bytes():
+    proc, port = start_server({"LOCALFLAKE_MAX_REQUEST_BYTES": "100000"})
+    connections = []
+    try:
+        cur = connector(port, connections)(paramstyle="qmark").cursor()
+        assert cur.execute("select length(?)", ("x" * 50_000,)).fetchone() == (50_000,)
+        with pytest.raises(ProgrammingError, match="LOCALFLAKE_MAX_REQUEST_BYTES"):
+            cur.execute("select length(?)", ("x" * 200_000,))
+        # The session carries on.
+        assert cur.execute("select 1").fetchone() == (1,)
+    finally:
+        for conn in connections:
+            conn.close()
+        stop_server(proc)
 
 
 def test_multiple_statements(connect):
