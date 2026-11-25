@@ -2,3 +2,5 @@
 !Cargo.toml
 !Cargo.lock
 !crates
+# The web UI ships as its committed build (ui/dist), not its dependencies.
+crates/localflake-server/ui/node_modules

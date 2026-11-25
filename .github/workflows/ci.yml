@@ -67,6 +67,35 @@ jobs:
         # -count=1: Go caches test results, but not by the server binary under test.
         run: go test -count=1 ./...
 
+  ui:
+    name: Web UI
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/localflake-server/ui
+    steps:
+      - uses: actions/checkout@v5
+      # Installs Vite+ (the version in ui/package.json), Node.js, Bun (pinned in ui/package.json)
+      # and the dependencies.
+      - uses: voidzero-dev/setup-vp@v1.22.0
+        with:
+          working-directory: crates/localflake-server/ui
+          node-version: "24"
+          cache: true
+          run-install: |
+            - args: ['--frozen-lockfile']
+      # Formatting (Oxfmt), lint (Oxlint) and type checks.
+      - run: vp check
+      - run: vp build
+      # ui/dist is committed so the binary builds without Node, so it must match the source.
+      - name: Check the committed build is current
+        run: |
+          if [ -n "$(git status --porcelain -- dist)" ]; then
+            git status --short -- dist
+            echo "::error::crates/localflake-server/ui/dist is out of date. Run 'bun run build' in crates/localflake-server/ui and commit the result."
+            exit 1
+          fi
+
   docker:
     name: Docker build (no push)
     # Only release pull requests: the image is only published from them.

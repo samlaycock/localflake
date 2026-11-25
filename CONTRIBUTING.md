@@ -11,7 +11,7 @@ the result real Snowflake gives (or the documentation page that describes it).
 
 | Crate | Role |
 |---|---|
-| `localflake-server` | Driver protocol over HTTP (axum): login, sessions, `query-request`, response encoding. Also the web UI: the page in `ui/` (plain HTML, CSS and JavaScript, embedded in the binary) and its JSON API in `src/ui.rs` |
+| `localflake-server` | Driver protocol over HTTP (axum): login, sessions, `query-request`, response encoding. Also the web UI's JSON API, in `src/ui.rs`. The page itself is a React app in `ui/`, built into `ui/dist` and embedded in the binary |
 | `localflake-engine` | DuckDB sessions, Snowflake databases as attached DuckDB catalogs, result encoding, error code mapping |
 | `localflake-sql` | Snowflake SQL → DuckDB: identifier case normalization, parsing (sqlparser-rs), statement classification and rewrites |
 
@@ -22,19 +22,22 @@ through the engine's encoder into Snowflake's `rowtype`/`rowset` format.
 
 You need a recent stable Rust toolchain and a C++ compiler. The driver suites
 also need Python with [uv](https://docs.astral.sh/uv/), Node.js and Go, and
-Node.js is needed for changesets.
+Node.js is needed for changesets. The web UI needs Node.js (22.22+, 24.11+ or
+26+) and [Bun](https://bun.com), its package manager.
 
 ```sh
 cargo run -- --addr 127.0.0.1:8080                  # in memory
 cargo run -- --data-dir ./data                      # one DuckDB file per database
 RUST_LOG=localflake_engine=debug cargo run          # log translated SQL
-LOCALFLAKE_UI_DIR=crates/localflake-server/ui cargo run   # serve the web UI's files from disk
 ```
 
-The web UI's files are embedded at build time. While working on them, set
-`LOCALFLAKE_UI_DIR` so a browser reload picks up changes without a rebuild.
-The page has no build step or dependencies: keep it that way, so localflake
-never needs the network.
+The web UI is a React app in `crates/localflake-server/ui`, built with stock
+shadcn/ui components. Its build output, `ui/dist`, is committed and compiled
+into the binary, so building localflake needs no Node and running it never
+needs the network. Run `bun run check` and `bun run build` in that directory
+and commit `ui/dist` with any change to it.
+[`crates/localflake-server/ui/README.md`](crates/localflake-server/ui/README.md)
+covers working on it and its conventions.
 
 Builds compile DuckDB from source by default (the engine's `bundled` feature),
 which takes several minutes. To link DuckDB's prebuilt library instead, as CI
@@ -60,8 +63,9 @@ cargo fmt --all
 ```
 
 Set `LOCALFLAKE_BIN` to test a different binary. CI runs `cargo fmt --check`,
-clippy with `-D warnings`, the workspace tests and all three driver suites on
-every pull request, and a Docker build check on release pull requests.
+clippy with `-D warnings`, the workspace tests, all three driver suites and the
+web UI's checks on every pull request, and a Docker build check on release pull
+requests.
 
 The three officially supported drivers share a conformance spec
 (`tests/conformance/cases.json`) that each suite runs through its driver, so
