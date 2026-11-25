@@ -1,0 +1,21 @@
+/*
+ * localflake's accent colour: the only product-specific styling. Everything else comes from the
+ * stock shadcn theme in index.css, which stays as `shadcn init` wrote it.
+ */
+:root {
+  --primary: oklch(0.52 0.105 223.128); /* cyan-700 */
+  --primary-foreground: oklch(0.985 0 0);
+  --ring: oklch(0.52 0.105 223.128);
+  --chart-1: oklch(0.52 0.105 223.128);
+  --sidebar-primary: oklch(0.52 0.105 223.128);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+}
+
+.dark {
+  --primary: oklch(0.789 0.154 211.53); /* cyan-400 */
+  --primary-foreground: oklch(0.205 0 0);
+  --ring: oklch(0.789 0.154 211.53);
+  --chart-1: oklch(0.789 0.154 211.53);
+  --sidebar-primary: oklch(0.789 0.154 211.53);
+  --sidebar-primary-foreground: oklch(0.205 0 0);
+}

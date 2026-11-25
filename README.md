@@ -146,7 +146,9 @@ differences between drivers.
 
 localflake serves a web UI at <http://127.0.0.1:8080/> (`/__localflake/ui/`),
 from the same port as the driver protocol. It's built into the binary and works
-offline.
+offline. The query history and sessions have their own addresses
+(`/__localflake/ui/history`, `/__localflake/ui/sessions`), as does each
+statement in the history, so you can link to them.
 
 - **Worksheets.** Write and run SQL in tabs, each with its own session and
   database and schema. `Cmd/Ctrl+Enter` runs the statement at the cursor (or

@@ -5,6 +5,7 @@ driver's statements and sessions should show up in the UI.
 """
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -57,10 +58,21 @@ def test_serves_the_page(ui):
     status, headers, body = ui("/__localflake/ui/")
     assert status == 200
     assert headers["Content-Type"].startswith("text/html")
-    assert b"app.js" in body
-    status, headers, _ = ui("/__localflake/ui/app.js")
+    assert headers["Cache-Control"] == "no-cache"
+    assert b'<div id="root"></div>' in body
+    # The app's own paths are the page too.
+    for path in ("history", "history/01abc-query", "sessions"):
+        status, headers, page = ui(f"/__localflake/ui/{path}")
+        assert status == 200 and page == body
+    # Its hashed assets never change.
+    script = re.search(rb'src="/__localflake/ui/(assets/[^"]+\.js)"', body).group(1).decode()
+    status, headers, _ = ui(f"/__localflake/ui/{script}")
     assert status == 200 and headers["Content-Type"].startswith("text/javascript")
+    assert "immutable" in headers["Cache-Control"]
+    status, headers, _ = ui("/__localflake/ui/favicon.svg")
+    assert status == 200 and headers["Content-Type"] == "image/svg+xml"
     assert ui("/__localflake/ui/nope.js")[0] == 404
+    assert ui("/__localflake/ui/assets/nope.js")[0] == 404
 
 
 def test_refuses_cross_origin_requests(ui):

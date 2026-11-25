@@ -2,10 +2,12 @@
 //! connected sessions, served at `/__localflake/ui/`, and the JSON API behind
 //! it under `/__localflake/api/`.
 //!
-//! The page is static and embedded in the binary, so there's no build step
-//! and localflake still never needs the network. Like the driver protocol,
-//! the API has no authentication, but it refuses cross-origin requests, so
-//! other websites open in the same browser can't use it.
+//! The page is a React app in `ui/`, built into `ui/dist` (which is committed)
+//! and embedded in the binary, so building localflake needs no Node and
+//! running it never needs the network. Debug builds read `ui/dist` from disk,
+//! so a rebuilt UI shows on reload. Like the driver protocol, the API has no
+//! authentication, but it refuses cross-origin requests, so other websites
+//! open in the same browser can't use it.
 
 use std::collections::HashMap;
 
@@ -25,10 +27,9 @@ use serde_json::{Value, json};
 use crate::protocol::rowtype;
 use crate::routes::{AppState, ClientSession, RequestGuard, SessionEntry, internal, open_session};
 
-const INDEX_HTML: &str = include_str!("../ui/index.html");
-const APP_JS: &str = include_str!("../ui/app.js");
-const APP_CSS: &str = include_str!("../ui/app.css");
-const FAVICON: &str = include_str!("../ui/favicon.svg");
+#[derive(rust_embed::RustEmbed)]
+#[folder = "ui/dist/"]
+struct Dist;
 
 /// The user web UI sessions log in as, unless the page asks for another.
 const DEFAULT_USER: &str = "WEB_UI";
@@ -58,25 +59,48 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(|| async { Redirect::to("/__localflake/ui/") }))
         .route("/__localflake/ui", get(|| async { Redirect::permanent("/__localflake/ui/") }))
-        .route("/__localflake/ui/", get(|| async { asset("index.html") }))
-        .route("/__localflake/ui/{name}", get(|Path(name): Path<String>| async move { asset(&name) }))
+        .route("/__localflake/ui/", get(|| async { page() }))
+        .route("/__localflake/ui/{*path}", get(|Path(path): Path<String>| async move { asset(&path) }))
         .nest("/__localflake/api", api)
 }
 
-/// An embedded file of the page. For working on the UI, `LOCALFLAKE_UI_DIR`
-/// serves them from a directory instead, so changes show without a rebuild.
-fn asset(name: &str) -> Response {
-    let (embedded, content_type) = match name {
-        "index.html" => (INDEX_HTML, "text/html; charset=utf-8"),
-        "app.js" => (APP_JS, "text/javascript; charset=utf-8"),
-        "app.css" => (APP_CSS, "text/css; charset=utf-8"),
-        "favicon.svg" => (FAVICON, "image/svg+xml"),
-        _ => return StatusCode::NOT_FOUND.into_response(),
+/// The app's page, for its own paths (`history`, `sessions`...).
+fn page() -> Response {
+    file("index.html", "no-cache")
+}
+
+/// One of the app's files, or the page itself for the app's own paths.
+fn asset(path: &str) -> Response {
+    if path.split('/').any(|part| part == "..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if path.starts_with("assets/") {
+        // Vite puts a content hash in every asset's name, so an asset never changes.
+        return file(path, "public, max-age=31536000, immutable");
+    }
+    if Dist::get(path).is_some() {
+        return file(path, "no-cache");
+    }
+    // A missing file (`foo.js`) is a 404; anything else is a page of the app.
+    if path.rsplit('/').next().is_some_and(|last| last.contains('.')) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    page()
+}
+
+fn file(path: &str, cache_control: &'static str) -> Response {
+    let Some(f) = Dist::get(path) else { return StatusCode::NOT_FOUND.into_response() };
+    let content_type = match path.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("png") => "image/png",
+        _ => "application/octet-stream",
     };
-    let body = std::env::var_os("LOCALFLAKE_UI_DIR")
-        .and_then(|dir| std::fs::read_to_string(std::path::Path::new(&dir).join(name)).ok())
-        .unwrap_or_else(|| embedded.to_owned());
-    ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body).into_response()
+    ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, cache_control)], f.data).into_response()
 }
 
 /// Refuses requests from other origins: a page on another site could
