@@ -1,5 +1,17 @@
 # localflake
 
+## 0.3.0
+
+### Minor Changes
+
+- [#24](https://github.com/samlaycock/localflake/pull/24) [`627656a`](https://github.com/samlaycock/localflake/commit/627656aeeb15f5f05cad3b9e5585fdc35fa5dd08) Thanks [@samlaycock](https://github.com/samlaycock)! - The web UI is rebuilt as a React app with shadcn/ui components. Everything works as before (worksheets, autocomplete, the object explorer, saved queries, the query history and sessions), with a few changes:
+  
+  - The query history and sessions have their own addresses, `/__localflake/ui/history` and `/__localflake/ui/sessions`, and each statement's detail has one too (`/__localflake/ui/history/<query id>`). The history's filters are kept in the URL. Old `#history` and `#sessions` links still work.
+  - An error's query ID links to its detail in the history.
+  - The explorer, the editor and the history's detail can be resized, and there's a light, dark and system theme switch.
+  - Worksheets and saved queries carry over from the previous UI.
+  - `LOCALFLAKE_UI_DIR` is gone: debug builds read the built UI from disk, and `bun run dev` in `crates/localflake-server/ui` serves it with hot reload.
+
 ## 0.2.1
 
 ### Patch Changes
